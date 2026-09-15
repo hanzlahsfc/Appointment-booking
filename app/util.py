@@ -1,4 +1,4 @@
-"""Timezone helpers and poll jitter."""
+"""Timezone helpers, poll jitter, and name slugging."""
 from __future__ import annotations
 
 import random
@@ -6,6 +6,12 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 PKT = ZoneInfo("Asia/Karachi")
+
+
+def slugify(name: str) -> str:
+    """Filesystem-safe slug used for credential and state files.
+    'Ahmed - Work Permit' -> 'Ahmed_-_Work_Permit'"""
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
 
 
 def now_pkt(tz: str = "Asia/Karachi") -> datetime:

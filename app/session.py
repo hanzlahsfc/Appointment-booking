@@ -9,6 +9,7 @@ from pathlib import Path
 from playwright.async_api import BrowserContext, Page
 
 from .browser import IncapsulaHandler, get_page
+from .util import slugify
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,7 @@ def load_credentials(path: str | Path) -> dict:
 
 
 def storage_state_path(state_dir: Path, profile_name: str) -> Path:
-    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in profile_name)
-    return state_dir / f"{safe}.json"
+    return state_dir / f"{slugify(profile_name)}.json"
 
 
 def has_storage_state(state_dir: Path, profile_name: str) -> bool:

@@ -26,7 +26,7 @@ from .session import (
     storage_state_path,
 )
 from .store import Store
-from .util import iso_pkt, jittered_delay, now_pkt, PKT
+from .util import iso_pkt, jittered_delay, now_pkt, PKT, slugify
 
 if TYPE_CHECKING:
     from .dashboard import DashboardState
@@ -338,4 +338,4 @@ class CrawlerWorker:
         return date_str, time_str
 
     def _slug(self, name: str) -> str:
-        return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
+        return slugify(name)
