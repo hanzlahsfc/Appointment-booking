@@ -1,0 +1,18 @@
+[Unit]
+Description=GVCW appointment slot crawler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gvcw
+WorkingDirectory=/opt/gvcw-crawler
+EnvironmentFile=/opt/gvcw-crawler/.env
+ExecStart=/opt/gvcw-crawler/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/gvcw-crawler.log
+StandardError=append:/var/log/gvcw-crawler.log
+
+[Install]
+WantedBy=multi-user.target

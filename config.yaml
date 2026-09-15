@@ -1,0 +1,25 @@
+app:
+  poll_interval_seconds: 300     # 5 min base
+  jitter_seconds: 30             # +/- random delay
+  concurrency: 4                 # max simultaneous browser contexts
+  timezone: "Asia/Karachi"
+  dry_run: false                 # true = check + log, NO emails
+  headless: true                 # set false during recon pass
+
+profiles:
+  - name: "Ahmed - Work Permit"
+    email: "alerts@gvcwclient.example"
+    category: "national_d_employment"
+    location: "lahore"
+    booking_url: "https://pk-gr-services.gvcworld.eu/login/appointments"
+
+  - name: "Ahmed - Premiere Launch"
+    email: "alerts@gvcwclient.example"
+    category: "national_d_seasonal"
+    location: "islamabad"
+    booking_url: "https://pk-gr-services.gvcworld.eu/login/appointments"
+
+notifications:
+  resend_api_key_env: "RESEND_API_KEY"
+  from: "GVCW Slot Alert <oncall@yourdomain.com>"
+  to: ["client@example.com"]

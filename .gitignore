@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Runtime data (never commit)
+data/
+state/
+
+# Credential files (chmod 600)
+data/creds/
+
+# Playwright artifacts
+*.playwright.log
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

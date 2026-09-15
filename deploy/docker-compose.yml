@@ -1,0 +1,16 @@
+services:
+  crawler:
+    build: .
+    container_name: gvcw-crawler
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - TZ=Asia/Karachi
+    volumes:
+      - ./data:/app/data
+      - ./state:/app/state
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
