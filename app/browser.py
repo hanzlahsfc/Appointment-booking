@@ -15,7 +15,12 @@ CHALLENGE_POLL = 2
 
 
 class WAFError(Exception):
+    """Raised when Imperva/Incapsula blocks or challenges the client."""
     pass
+
+
+class WAFBlocked(WAFError):
+    """Hard IP/range block (Incapsula 'Error 17 — Access denied')."""
 
 
 class IncapsulaHandler:
@@ -29,7 +34,8 @@ class IncapsulaHandler:
         """Block until the challenge is cleared.
 
         Pauses while the URL/keyword match `expect_text` is absent. If the WAF
-        shell is still present after max_wait, raise WAFError.
+        shell is still present after max_wait, raise WAFError. A hard IP block
+        ('Access denied', 'Error 17', 'incident_id') is detected immediately.
         """
         elapsed = 0.0
         while True:
@@ -39,6 +45,19 @@ class IncapsulaHandler:
                 body_text = await page.locator("body").inner_text(timeout=2000)
             except Exception:
                 pass
+            for f in page.frames:
+                try:
+                    t = (await f.locator("body").inner_text(timeout=800)).strip()
+                    body_text += "\n" + t
+                except Exception:
+                    continue
+            # hard IP/range rejections show immediately — surface them
+            low = body_text.lower()
+            if "access denied" in low or "error 17" in low:
+                raise WAFBlocked(
+                    "Imperva blocked this client (Access denied / Error 17). "
+                    "The egress IP is flagged — use a different network or a proxy."
+                )
             if not any(m in url for m in self.markers):
                 if expect_text is None or expect_text.lower() in body_text.lower():
                     return
@@ -61,7 +80,12 @@ async def create_browser(headless: bool = True) -> Browser:
     return browser
 
 
-async def new_context(browser: Browser, storage_state: str | Path | None = None, locale: str = "en-GB") -> BrowserContext:
+async def new_context(
+    browser: Browser,
+    storage_state: str | Path | None = None,
+    locale: str = "en-GB",
+    proxy: str | None = None,
+) -> BrowserContext:
     kwargs = {
         "locale": locale,
         "viewport": {"width": 1366, "height": 900},
@@ -71,6 +95,8 @@ async def new_context(browser: Browser, storage_state: str | Path | None = None,
         ),
         "timezone_id": "Asia/Karachi",
     }
+    if proxy:
+        kwargs["proxy"] = {"server": proxy}
     if storage_state:
         state_path = Path(storage_state)
         if state_path.exists():

@@ -45,6 +45,7 @@ class Config:
     app: AppConfig
     profiles: list[ProfileConfig]
     notifications: NotificationsConfig
+    proxy: str | None = None  # e.g. socks5://user:pass@host:1080 or http://host:3128
     root: Path = ROOT
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
     state_dir: Path = field(default_factory=lambda: ROOT / "state")
@@ -116,6 +117,7 @@ def load_config(path: str | Path | None = None) -> Config:
         app=app,
         profiles=profiles,
         notifications=notifications,
+        proxy=(raw.get("network", {}) or {}).get("proxy"),
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.creds_dir.mkdir(parents=True, exist_ok=True)

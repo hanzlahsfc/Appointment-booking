@@ -202,7 +202,11 @@ class CrawlerWorker:
     # ── helpers (real mode) ───────────────────────────────────────────────
 
     async def _make_context(self, state_path: Path, creds_file: Path) -> BrowserContext:
-        context = await new_context(self._browser, storage_state=state_path)
+        context = await new_context(
+            self._browser,
+            storage_state=state_path,
+            proxy=self.cfg.proxy,
+        )
         if not has_storage_state(self.cfg.state_dir, self.profile["name"]):
             await ensure_logged_in(context, creds_file, self.profile["name"], state_path)
         return context

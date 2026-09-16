@@ -6,6 +6,11 @@ app:
   dry_run: false                 # true = check + log, NO emails
   headless: true                 # set false during recon pass
 
+# Optional: route browser traffic through a (recommended: residential) proxy
+# to escape IP-reputation blocks from Imperva/Incapsula.
+# network:
+#   proxy: "socks5://user:pass@host:1080"   # or http://host:3128
+
 profiles:
   - name: "Ahmed - Work Permit"
     email: "alerts@gvcwclient.example"

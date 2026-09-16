@@ -150,6 +150,11 @@ notifications:
 | `schengen_c` | Schengen C (no longer used in this build) |
 | `attestation` | Attestation |
 
+Optional `network.proxy` (uncomment in `config.yaml`): routes all browser
+traffic through a proxy to avoid Imperva IP-reputation blocks, e.g.
+`proxy: "socks5://user:pass@host:1080"`. Only needed when the host IP is
+blocked with "Error 17".
+
 Secrets live only in `.env`: `RESEND_API_KEY`, optional `RESEND_FROM`.
 
 ---
