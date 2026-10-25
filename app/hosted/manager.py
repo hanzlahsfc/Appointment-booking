@@ -269,6 +269,34 @@ class ClientBrowser:
         self._subscribers.add(queue)
         return queue
 
+    async def capture_once(self) -> None:
+        """Push one frame now, for a subscriber that just connected.
+
+        The screencast only emits when the page repaints — a client joining an
+        idle browser would otherwise stare at the 'connecting' overlay forever.
+        """
+        if self._cdp is None or self.page is None or self.page.is_closed():
+            return
+        try:
+            shot = await self._cdp.send(
+                "Page.captureScreenshot",
+                {"format": "jpeg", "quality": self.cfg.screen_quality},
+            )
+            data = shot.get("data")
+            if data:
+                self._seq += 1
+                self.publish(
+                    {
+                        "type": "frame",
+                        "data": data,
+                        "seq": self._seq,
+                        "w": self.cfg.viewport_width,
+                        "h": self.cfg.viewport_height,
+                    }
+                )
+        except Exception:
+            logger.debug("one-shot capture failed", exc_info=True)
+
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         self._subscribers.discard(queue)
 

@@ -20,6 +20,21 @@ app:
 # network:
 #   proxy: "socks5://user:pass@host:1080"   # or http://host:3128
 
+# Hosted-client layer (python -m app.hosted serve). Provisioned clients drive
+# an isolated portal browser on this host through a screencast stream.
+# allow_mock_portal is a TEST-ONLY allowance for the fake portal; leave false
+# in production.
+hosted:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 8081
+  session_ttl_hours: 12
+  manual_idle_seconds: 900      # idle manual control returns to automation
+  poll_interval_seconds: 30     # hosted monitoring poll cadence
+  headless: true                # hosted browsers never open windows
+  allow_mock_portal: false      # TEST ONLY — enables tests/fake_portal
+  mock_portal_url: "http://127.0.0.1:8099"
+
 profiles:
   - name: "Ahmed - Work Permit"
     email: "alerts@gvcwclient.example"

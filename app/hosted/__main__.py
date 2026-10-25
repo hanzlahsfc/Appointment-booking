@@ -186,6 +186,8 @@ async def _serve(args) -> int:
         cfg.booking.mode = args.booking_mode
     if args.booking_dry_run is not None:
         cfg.booking.dry_run = args.booking_dry_run
+    if args.poll_interval:
+        cfg.hosted.poll_interval_seconds = args.poll_interval
 
     hstore = HostedStore(cfg.hosted.db_path, cfg.db_path)
     store = Store(cfg.db_path)
@@ -300,6 +302,8 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--with-mock-portal", action="store_true",
                        help="also run the fake portal (TEST ONLY — needs "
                             "hosted.allow_mock_portal)")
+    serve.add_argument("--poll-interval", type=int, default=None,
+                       help="override hosted.poll_interval_seconds")
 
     add = sub.add_parser("add-client", help="provision a client account")
     add.add_argument("username")

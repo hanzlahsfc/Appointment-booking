@@ -202,6 +202,8 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
                     "monitor": feed.snapshot() if feed else None,
                 }
             )
+            # The screencast only emits on repaint — seed this subscriber.
+            await browser.capture_once()
         except Exception:
             browser.unsubscribe(queue)
             return

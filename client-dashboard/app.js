@@ -317,12 +317,30 @@ document.addEventListener("keyup", (e) => {
 
 /* ── records refresh (slow poll; cheap) ────────────────────────────── */
 
-setInterval(async () => {
+async function refreshRecords() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const resp = await api("/api/records");
   if (!resp.ok) return;
   const data = await resp.json();
   renderSlots((data.slots || []).filter((s) => s.active !== 0));
-}, 15000);
+  renderFeed($("alerts"), (data.alerts || []),
+    (a) => `${a.date} ${a.time || ""} — ${a.category}`);
+  renderFeed($("bookings"), (data.bookings || []),
+    (b) => `${b.date || ""} ${b.time || ""} — ${b.status}`);
+}
+
+function renderFeed(ul, items, fmt) {
+  // Live WS events prepend instantly; this paints the persisted record list
+  // beneath them (deduped loosely by text to avoid flicker).
+  if (!items.length) return;
+  const existing = new Set([...ul.children].map((li) => li.textContent.slice(0, 40)));
+  items.forEach((item) => {
+    const text = fmt(item);
+    if (existing.has(text.slice(0, 40))) return;
+    ul.appendChild(feedLine(item, text));
+  });
+}
+
+setInterval(refreshRecords, 15000);
 
 boot();
