@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS clients (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     username        TEXT NOT NULL UNIQUE COLLATE NOCASE,
     display_name    TEXT NOT NULL,
-    password_hash   TEXT NOT NULL,
+    password_hash   TEXT NOT NULL DEFAULT '',
+    access_code_hash TEXT NOT NULL DEFAULT '',
     active          INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
     -- The monitoring profile this client owns. slot_state/booking_log rows are
@@ -74,6 +75,14 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def generate_access_code() -> str:
+    """A single unguessable dashboard credential: 96 bits of entropy, grouped
+    for reading (ab-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx). Shown to the operator once
+    at issue time, stored only as a PBKDF2 hash — the database alone cannot be
+    replayed into a login."""
+    return "ab-" + "-".join(secrets.token_hex(2) for _ in range(6))
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -88,6 +97,12 @@ class HostedStore:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        # Idempotent upgrade for DBs created before access codes existed.
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(clients)")}
+        if "access_code_hash" not in cols:
+            self._conn.execute(
+                "ALTER TABLE clients ADD COLUMN access_code_hash TEXT NOT NULL DEFAULT ''"
+            )
         self._conn.commit()
         self._slot_db = str(slot_db_path) if slot_db_path else None
         self._slot_conn: sqlite3.Connection | None = None
@@ -98,7 +113,6 @@ class HostedStore:
         self,
         username: str,
         display_name: str,
-        password: str,
         profile_name: str,
         booking_url: str,
         category: str,
@@ -106,24 +120,29 @@ class HostedStore:
         allowed_origins: list[str],
         selectors: dict[str, Any] | None = None,
         auto_book: bool = False,
-    ) -> dict:
+        access_code: str | None = None,
+    ) -> tuple[dict, str]:
+        """Create a client; returns (client, plaintext access code).
+
+        The code is shown to the operator exactly once — only its PBKDF2 hash
+        is stored. There is no API to read it back.
+        """
         username = username.strip()
         if not username:
             raise ValueError("username is required")
-        if len(password) < 8:
-            raise ValueError("password must be at least 8 characters")
+        code = access_code or generate_access_code()
         origins = [o.rstrip("/") for o in allowed_origins]
         if not origins:
             raise ValueError("at least one allowed origin is required")
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO clients (username, display_name, password_hash, created_at,"
-                " profile_name, booking_url, category, location, allowed_origins,"
-                " selectors, auto_book) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO clients (username, display_name, access_code_hash,"
+                " created_at, profile_name, booking_url, category, location,"
+                " allowed_origins, selectors, auto_book) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     username,
                     display_name.strip() or username,
-                    hash_password(password),
+                    hash_password(code),
                     _now(),
                     profile_name,
                     booking_url,
@@ -135,7 +154,7 @@ class HostedStore:
                 ),
             )
             self._conn.commit()
-            return self.get_client(int(cur.lastrowid))  # type: ignore[return-value]
+            return self.get_client(int(cur.lastrowid)), code  # type: ignore[return-value]
 
     def list_clients(self) -> list[dict]:
         return [self._row_to_client(r) for r in self._conn.execute(
@@ -154,17 +173,21 @@ class HostedStore:
         ).fetchone()
         return self._row_to_client(row) if row else None
 
-    def set_password(self, client_id: int, password: str) -> bool:
-        if len(password) < 8:
-            raise ValueError("password must be at least 8 characters")
+    def issue_code(self, client_id: int) -> str | None:
+        """Rotate the access code; returns the new plaintext code once.
+
+        Rotating revokes every open session — a leaked code stops working the
+        moment a new one is issued.
+        """
+        code = generate_access_code()
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE clients SET password_hash=? WHERE id=?",
-                (hash_password(password), client_id),
+                "UPDATE clients SET access_code_hash=? WHERE id=?",
+                (hash_password(code), client_id),
             )
             self._conn.execute("DELETE FROM sessions WHERE client_id=?", (client_id,))
             self._conn.commit()
-            return cur.rowcount > 0
+        return code if cur.rowcount > 0 else None
 
     def set_active(self, client_id: int, active: bool) -> bool:
         with self._lock:
@@ -179,7 +202,9 @@ class HostedStore:
     @staticmethod
     def _row_to_client(row: sqlite3.Row) -> dict:
         client = dict(row)
+        # Hashed credentials never leave the store, even internally.
         client.pop("password_hash", None)
+        client.pop("access_code_hash", None)
         client["allowed_origins"] = json.loads(client.get("allowed_origins") or "[]")
         client["selectors"] = json.loads(client.get("selectors") or "{}")
         client["active"] = bool(client["active"])
@@ -188,19 +213,26 @@ class HostedStore:
 
     # ── login + sessions ─────────────────────────────────────────────────
 
-    def authenticate(self, username: str, password: str) -> dict | None:
-        """Return the client row for a valid login, else None."""
-        row = self._conn.execute(
-            "SELECT * FROM clients WHERE username=?", (username.strip(),)
-        ).fetchone()
-        if row is None or not row["active"]:
-            # Verify against a dummy hash anyway so the timing does not reveal
-            # whether the username exists.
-            verify_password(password, hash_password("x" * 16))
+    def authenticate_code(self, code: str) -> dict | None:
+        """Code -> client row, or None.
+
+        There is no username: the code itself identifies the client. Every
+        active row is verified (PBKDF2 is deliberately slow), so the timing
+        does not reveal whether a prefix matched or how many clients exist.
+        """
+        if not code or not code.strip():
             return None
-        if not verify_password(password, row["password_hash"]):
+        code = code.strip()
+        rows = self._conn.execute(
+            "SELECT * FROM clients WHERE active=1 AND access_code_hash != ''"
+        ).fetchall()
+        match = None
+        for row in rows:
+            if verify_password(code, row["access_code_hash"]):
+                match = row
+        if match is None:
             return None
-        return self._row_to_client(row)
+        return self._row_to_client(match)
 
     def create_session(self, client_id: int, ttl_hours: int) -> str:
         token = secrets.token_urlsafe(32)

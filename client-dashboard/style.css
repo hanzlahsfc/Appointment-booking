@@ -145,6 +145,9 @@ aside h2 { font-size: 14px; margin: 0 0 8px; }
 .feed .when { color: var(--muted); font-size: 11px; display: block; }
 
 #booking-status .needs-human { color: var(--warn); font-weight: 700; }
+#booking-status .booked { color: var(--accent); font-weight: 700; }
+.small { font-size: 12px; margin-top: 6px; }
+#booking-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
 .status-dot.ok { background: var(--accent); }
 .status-dot.error, .status-dot.holding { background: var(--danger); }

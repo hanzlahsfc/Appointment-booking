@@ -33,22 +33,29 @@ automation runs in the same browser and pauses while the client is in control.
   JavaScript execution, no raw CDP. There is no endpoint that evaluates
   expressions — input is the only thing that flows in.
 - Clients are provisioned by CLI only; there is no signup surface.
+- Login is a single unguessable access code (96-bit, PBKDF2-hashed at rest,
+  rate-limited per source IP, shown once at issue). Sessions are Bearer
+  tokens scoped to that one client.
+- The booking alarm sounds in the CLIENT's browser (Web Audio, gated by
+  an 'Enable sound' gesture). Honest limits: background tabs may throttle
+  or suspend audio/timers — the persistent banner + booking card are the
+  reliable channel; acknowledge is remembered across reconnects.
 
 ## Provisioning (operator)
 
 ```bat
 :: mock-portal test client (requires hosted.allow_mock_portal or AB_ALLOW_MOCK_PORTAL=1)
-python -m app.hosted add-client alice --name "Alice" --password "long pass" --preset mock
+python -m app.hosted add-client alice --name "Alice" --preset mock   # prints a one-time access code
 
 :: real client — fill in the real portal origin/selectors after recon
-python -m app.hosted add-client alice --name "Alice" --password "long pass" ^
+python -m app.hosted add-client alice --name "Alice" ^
     --booking-url "https://pk-gr-services.gvcworld.eu/login/appointments" ^
     --origin "https://pk-gr-services.gvcworld.eu" ^
     --category national_d_employment --location lahore ^
     --selectors-file recon/booking-selectors.json --auto-book
 
 python -m app.hosted list-clients
-python -m app.hosted passwd alice --password "new pass"
+python -m app.hosted issue-code alice   # rotates the code; sessions revoked
 python -m app.hosted deactivate alice
 ```
 
@@ -72,8 +79,8 @@ python -m app.hosted serve --with-mock-portal --booking-mode assist --no-booking
 
 :: another terminal
 set AB_ALLOW_MOCK_PORTAL=1
-python -m app.hosted add-client demo --password demo-pass-123 --preset mock
-python scripts\demo_hosted.py --username demo --password demo-pass-123 --seed "2026-12-15 09:00"
+python -m app.hosted add-client demo --preset mock   # prints a one-time access code
+python scripts\demo_hosted.py --code ab-... --seed "2026-12-15 09:00"
 ```
 
 `demo_hosted.py` is a real remote client (HTTP + WebSocket only): it logs in,

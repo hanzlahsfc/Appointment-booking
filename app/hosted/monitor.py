@@ -142,6 +142,10 @@ class ClientFeed:
             "status": self.state.get("status"),
             "message": self.state.get("message", ""),
             "last_poll": self.state.get("last_poll"),
+            "last_check": self.state.get("last_check"),
+            "latency_ms": self.state.get("latency_ms"),
+            "effective_interval_s": self.state.get("effective_interval_s"),
+            "throttle": self.state.get("throttle"),
             "slots": self.state.get("slots", []),
             "new_count": self.state.get("new_count", 0),
         }
@@ -177,7 +181,14 @@ class HostedMonitor:
         self._alarm = alarm
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._selectors: BookingSelectors | None = None
         self.feed: ClientFeed | None = None
+        # single-flight accounting — one poll at a time, always
+        self._in_flight = False
+        self._last_poll_started: float | None = None
+        self._last_check: float | None = None       # last successful portal read
+        self._last_latency_ms: float | None = None
+        self._effective_interval: float | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -204,9 +215,14 @@ class HostedMonitor:
         )
         if isinstance(self.client.get("selectors", {}).get("token_inputs"), list):
             selectors.token_inputs = tuple(self.client["selectors"]["token_inputs"])
+        self._selectors = selectors
 
         interval = max(5, self.cfg.hosted.poll_interval_seconds)
         while not self._stop.is_set():
+            started = time.monotonic()
+            if self._last_poll_started is not None:
+                self._effective_interval = started - self._last_poll_started
+            self._last_poll_started = started
             try:
                 await self._poll_once(browser, selectors)
             except asyncio.CancelledError:
@@ -217,25 +233,56 @@ class HostedMonitor:
                     self.profile_name, status="error",
                     message=f"{type(exc).__name__}: {exc}", last_poll=time.time(),
                 )
+            # Wait the configured interval — polls never overlap and never spin.
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
     async def _poll_once(self, browser, selectors: BookingSelectors) -> None:
+        """One check of the portal. Single-flight by construction: the loop
+        awaits this and _in_flight guards any re-entry from elsewhere."""
+        if self._in_flight:
+            return
+        self._in_flight = True
+        try:
+            await self._poll_body(browser, selectors)
+        finally:
+            self._in_flight = False
+
+    async def _poll_body(self, browser, selectors: BookingSelectors) -> None:
         profile = self.profile_name
 
-        # 1. The client is driving — hands off entirely.
+        # 1. A held reservation may have been finished by hand — check the
+        #    current page (read-only) for the confirmation marker. This works
+        #    even while the client holds manual control: reading is not
+        #    control, and a submitted form already shows the marker.
+        unresolved = self.store.unresolved_booking(profile)
+        if unresolved and unresolved["status"] == "needs_human":
+            ref = await self._check_completion(browser)
+            if ref:
+                self._record_completion(unresolved, ref)
+            else:
+                self._throttle_status(
+                    "holding", "unresolved booking",
+                    f"booking attempt #{unresolved['id']} is held — complete "
+                    "the form in the browser, or resolve it",
+                )
+                return
+
+        # 2. The client is driving — hands off entirely.
         if browser.is_manual:
-            self.feed.set_status(profile, status="manual_control",
-                                 message="client is in control; automation paused")
+            self._throttle_status(
+                "manual_control", "manual control",
+                "client is in control; automation paused",
+            )
             return
 
-        # 2. A slot may still be held — never navigate away from it. The check
-        #    is the same DB-backed one the crawler uses, so it persists restarts.
+        # 3. Any other block (in-flight attempt, aborted_unknown_state) parks
+        #    polling. DB-backed — survives restarts.
         reason = self._block_reason()
         if reason:
-            self.feed.set_status(profile, status="holding", message=reason)
+            self._throttle_status("holding", "unresolved booking", reason)
             return
 
         page = await browser.ensure_page()
@@ -248,18 +295,16 @@ class HostedMonitor:
         if await driver.is_login_page():
             # No stored credentials exist for hosted clients — the human on the
             # other end of the screencast does the portal sign-in.
-            self.feed.set_status(
-                profile, status="awaiting_login",
-                message="portal sign-in required — take control and log in",
-                last_poll=time.time(),
+            self._throttle_status(
+                "awaiting_login", "awaiting login",
+                "portal sign-in required — take control and log in",
             )
             return
 
         if not selectors.configured or not selectors.slot_row:
-            self.feed.set_status(
-                profile, status="error",
-                message="monitoring selectors are not configured for this client",
-                last_poll=time.time(),
+            self._throttle_status(
+                "error", "configuration",
+                "monitoring selectors are not configured for this client",
             )
             return
 
@@ -267,9 +312,15 @@ class HostedMonitor:
         rows = await driver.list_slots()
         slots = self._normalize(rows)
         dur = time.perf_counter() - t0
+        self._last_check = time.time()
+        self._last_latency_ms = round(dur * 1000)
 
         new_slots = self._process(slots)
-        self.feed.set_status(profile, status="ok", message="", last_poll=time.time())
+        self.feed.set_status(
+            profile, status="ok", message="", last_poll=time.time(),
+            last_check=self._last_check, latency_ms=self._last_latency_ms,
+            effective_interval_s=self._effective_interval, throttle=None,
+        )
         self.feed.set_slots(profile, slots)
         logger.info(
             "HOSTED OK | client=%s | slots=%d | new=%d | dur=%.1fs",
@@ -278,6 +329,77 @@ class HostedMonitor:
 
         if new_slots and not browser.is_manual:
             await self._maybe_book(browser, driver, new_slots)
+
+    def _throttle_status(self, status: str, throttle: str, message: str) -> None:
+        self.feed.set_status(
+            self.profile_name, status=status, message=message,
+            last_poll=time.time(), last_check=self._last_check,
+            latency_ms=self._last_latency_ms,
+            effective_interval_s=self._effective_interval, throttle=throttle,
+        )
+
+    # ── held-booking completion ──────────────────────────────────────────
+
+    async def _check_completion(self, browser) -> str | None:
+        """Read-only look at the current page for the confirmation marker."""
+        selectors = self._selectors
+        if not selectors or not selectors.confirmation_marker:
+            return None
+        page = browser.page
+        if page is None or page.is_closed():
+            return None
+        try:
+            return await PlaywrightSiteDriver(page, selectors).confirmation_ref()
+        except Exception:
+            return None
+
+    def _record_completion(self, row: dict, confirmation_ref: str) -> None:
+        finished = iso_pkt(now_pkt())
+        if not self.store.complete_booking(row["id"], confirmation_ref, finished):
+            return
+        slot = {
+            "profile": self.profile_name,
+            "location": self.client["location"],
+            "category": self.client["category"],
+            "date": row["date"],
+            "time": row.get("time"),
+        }
+        self.store.mark_booked(slot)
+        logger.warning(
+            "BOOKED | profile=%s | attempt=#%s | ref=%s — completed manually "
+            "by the client; no further bookings for this profile",
+            self.profile_name, row["id"], confirmation_ref,
+        )
+        self.feed.set_booking(
+            self.profile_name, status="booked", stage="manual",
+            slot=slot, confirmation_ref=confirmation_ref, finished_at=finished,
+        )
+        self.feed.set_status(
+            self.profile_name, status="booked",
+            message=f"booking confirmed ({confirmation_ref}); this profile "
+                    "cannot book again",
+            last_check=self._last_check, latency_ms=self._last_latency_ms,
+            effective_interval_s=self._effective_interval, throttle=None,
+        )
+
+    async def check_completion_now(self) -> dict:
+        """On-demand completion check for the dashboard's 'I finished' button."""
+        unresolved = self.store.unresolved_booking(self.profile_name)
+        if not unresolved:
+            return {"pending": False, "booked": self.store.has_booked(self.profile_name)}
+        if unresolved["status"] != "needs_human":
+            return {"pending": True, "status": unresolved["status"]}
+        browser = self.manager.browser_for(self.client["id"])
+        if browser is None:
+            return {"pending": True, "status": "needs_human",
+                    "error": "browser is not running"}
+        ref = await self._check_completion(browser)
+        if ref:
+            self._record_completion(unresolved, ref)
+            return {"pending": False, "booked": True,
+                    "confirmation_ref": ref}
+        return {"pending": True, "status": "needs_human",
+                "error": "no confirmation marker on the page yet"}
 
     # ── slot processing + booking ────────────────────────────────────────
 

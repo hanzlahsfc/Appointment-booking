@@ -42,10 +42,7 @@ $("login-form").addEventListener("submit", async (e) => {
   $("login-error").textContent = "";
   const resp = await api("/api/login", {
     method: "POST",
-    body: JSON.stringify({
-      username: $("login-username").value,
-      password: $("login-password").value,
-    }),
+    body: JSON.stringify({ code: $("login-code").value }),
   });
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
@@ -196,25 +193,136 @@ function applyMonitorState(state) {
   const label = (state.status || "—").replaceAll("_", " ");
   el.innerHTML = `<span class="status-dot ${state.status}"></span>${label}` +
     (state.message ? ` <span class="muted">— ${escapeHtml(state.message)}</span>` : "");
+  renderMetrics(state);
   renderSlots(state.slots || []);
   if (state.status === "needs_human") {
     showBanner("A slot was claimed for you — take control and finish the form now.", 0);
+    setBookingActions(true);
+    startAlarm(currentAlarmKey());
+  } else if (state.status === "booked") {
+    showBanner("Booking confirmed — no further action needed.", 0);
+    setBookingActions(false);
+    stopAlarm();
   } else if (state.status === "awaiting_login") {
     showBanner("Portal sign-in required — take control and log in.", 0);
+    setBookingActions(false);
+    stopAlarm();
   } else if (state.status === "manual_control") {
     showBanner("You are in control. Automation is paused.", 0);
+    // keep any active booking actions visible; only sound stops being re-armed
   } else {
     hideBanner();
+    setBookingActions(false);
   }
+}
+
+function renderMetrics(state) {
+  const el = $("monitor-metrics");
+  const parts = [];
+  if (state.last_check) {
+    const ago = Math.max(0, Math.round(Date.now() / 1000 - state.last_check));
+    parts.push(`last check ${ago}s ago`);
+  } else {
+    parts.push("no successful check yet");
+  }
+  if (state.latency_ms != null) parts.push(`took ${state.latency_ms}ms`);
+  if (state.effective_interval_s) {
+    parts.push(`every ~${Math.round(state.effective_interval_s)}s`);
+  }
+  if (state.throttle) parts.push(`paused: ${state.throttle}`);
+  el.textContent = parts.join(" · ");
 }
 
 function applyBooking(b) {
   if (!b || !b.status) return;
+  latestBooking = b;
   const el = $("booking-status");
   if (b.status === "needs_human") {
     el.innerHTML = `<p class="needs-human">⚠ Slot held ${b.slot?.date || b.date || ""} ${b.slot?.time || b.time || ""} — complete the form in the browser.</p>`;
+    startAlarm(currentAlarmKey(b));
+  } else if (b.status === "booked") {
+    el.innerHTML = `<p class="booked">✓ Booked — ref ${escapeHtml(b.confirmation_ref || "")}</p>`;
   }
 }
+
+/* ── client-side alarm ───────────────────────────────────────────────
+ * The sound lives in the CLIENT's browser, not on the host. Browsers only
+ * allow audio after a user gesture (Enable sound) and can throttle timers
+ * in background tabs — the persistent banner/booking card is the reliable
+ * channel; sound is a bonus. Acknowledge silences the current alert and is
+ * remembered across reconnects (localStorage, keyed by the slot).
+ */
+let audioCtx = null;
+let alarmTimer = null;
+let alarmKey = null;
+let latestBooking = null;
+
+function currentAlarmKey(b) {
+  const src = b || latestBooking || {};
+  return `${src.profile || ""}|${src.date || ""}|${src.time || ""}`;
+}
+
+function ackedKey() {
+  return localStorage.getItem("ab_acked_alert") || "";
+}
+
+function setBookingActions(show) {
+  $("booking-actions").classList.toggle("hidden", !show);
+}
+
+function startAlarm(key) {
+  alarmKey = key;
+  if (!key || key === ackedKey()) return;
+  if (!audioCtx) return;  // sound not enabled — banner still shows
+  if (alarmTimer) return;
+  alarmTimer = setInterval(beep, 1200);
+  beep();
+}
+
+function stopAlarm() {
+  if (alarmTimer) clearInterval(alarmTimer);
+  alarmTimer = null;
+}
+
+function beep() {
+  if (!audioCtx) return;
+  try {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.type = "sine"; o.frequency.value = 880;
+    g.gain.value = 0.12;
+    o.start(); o.stop(audioCtx.currentTime + 0.4);
+  } catch (_) { /* audio suspended — banner still shows */ }
+}
+
+$("btn-sound").addEventListener("click", async () => {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume();
+  $("btn-sound").classList.add("hidden");
+  $("btn-test-sound").classList.remove("hidden");
+  // a needs_human may already be on screen — arm it now
+  if (alarmKey) { stopAlarm(); alarmTimer = null; startAlarm(alarmKey); }
+});
+
+$("btn-test-sound").addEventListener("click", beep);
+
+$("btn-ack").addEventListener("click", () => {
+  if (alarmKey) localStorage.setItem("ab_acked_alert", alarmKey);
+  stopAlarm();
+});
+
+$("btn-finished").addEventListener("click", async () => {
+  const resp = await api("/api/booking/complete", { method: "POST" });
+  const data = await resp.json().catch(() => ({}));
+  if (data.booked) {
+    stopAlarm();
+    showBanner(`Booking confirmed (${data.confirmation_ref || "ok"}).`, 0);
+    setBookingActions(false);
+  } else {
+    showBanner(data.error || "Confirmation not visible yet — finish the form first.", 6000);
+  }
+});
 
 function renderSlots(slots) {
   $("slot-count").textContent = slots.length ? `(${slots.length})` : "";

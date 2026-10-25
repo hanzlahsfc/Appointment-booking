@@ -12,6 +12,22 @@ State as of 2026-10-26. Branch: `hosted-client` (forked from `extension-only` @ 
   screencast seeding fix
 - `4651737` — Bearer-token auth + AB_API_BASE + dashboard_origins CORS +
   start_hosted.cmd + cloudflared example (Vercel/tunnel ready)
+- pending — readiness pass: access-code login (PBKDF2, CLI issue/revoke,
+  rate-limited), client-side Web Audio alarm (Enable/Test/Ack + persistent
+  visual + reconnect restore), manual-completion -> booked transition
+  (confirmation-marker verified, blocks re-booking), single-flight monitor
+  metrics (last check / latency / effective interval / throttle),
+  POST /api/booking/complete, docs/REAL-CLAIM-CHECKLIST.md
+
+## Report clarifications
+
+- "Live demo" = the loopback mock portal (tests/fake_portal), never real
+  GVCW. Real portal still WAF-blocked from this IP (verified 2026-10-26:
+  `blocked=True`, Incapsula shell) — login/picker selectors for the REAL
+  site cannot be observed until a WAF-clean egress exists.
+- Earlier "alarm fired" was HOST audio (winsound.Beep on the laptop). The
+  alarm is now client-side browser audio — enable once per tab; background
+  tabs may throttle/suspend it, the persistent banner is the reliable part.
 
 ## What works (verified, not claimed)
 

@@ -95,15 +95,14 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        username = str(body.get("username", ""))
-        password = str(body.get("password", ""))
-        key = f"{username.lower()}|{request.client.host if request.client else '?'}"
+        code = str(body.get("code", ""))
+        key = request.client.host if request.client else "?"
         if not rt.login_limiter.allow(key):
             return JSONResponse({"error": "too many attempts — slow down"}, status_code=429)
-        client = rt.hstore.authenticate(username, password)
+        client = rt.hstore.authenticate_code(code)
         if client is None:
             rt.login_limiter.fail(key)
-            return JSONResponse({"error": "invalid credentials"}, status_code=401)
+            return JSONResponse({"error": "invalid access code"}, status_code=401)
         rt.login_limiter.clear(key)
         token = rt.hstore.create_session(client["id"], rt.cfg.hosted.session_ttl_hours)
         response = JSONResponse({"token": token, "client": _public_client(client)})
@@ -169,6 +168,23 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
             browser.take_control()
         return JSONResponse({"control": "manual" if browser.is_manual else "automation"})
 
+    @app.post("/api/booking/complete")
+    async def booking_complete(request: Request):
+        """'I finished the form' — verify the confirmation marker is on the
+        client's page, then record the held booking as booked.
+
+        Never trusts the click: the row only flips to booked when the
+        portal's own confirmation marker is visible.
+        """
+        client = _client_or_401(request)
+        if client is None:
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+        monitor = rt.monitor_for(client["id"])
+        if monitor is None:
+            return JSONResponse({"error": "no monitor for this client"},
+                                status_code=409)
+        return JSONResponse(await monitor.check_completion_now())
+
     @app.post("/api/browser/home")
     async def browser_home(request: Request):
         """Send the client's browser back to their own portal booking page."""
@@ -222,9 +238,12 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
         budget = _InputBudget(rt.cfg.hosted.max_input_events_per_second)
 
         async def _writer() -> None:
-            while True:
-                event = await queue.get()
-                await _send(event)
+            try:
+                while True:
+                    event = await queue.get()
+                    await _send(event)
+            except (WebSocketDisconnect, RuntimeError):
+                return
 
         async def _reader() -> None:
             try:

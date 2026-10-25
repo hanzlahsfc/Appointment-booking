@@ -11,9 +11,9 @@
 <section id="login-view" class="center-card">
   <form id="login-form" class="card">
     <h1>Appointment Booker</h1>
-    <p class="muted">Sign in to your monitoring dashboard</p>
-    <input id="login-username" autocomplete="username" placeholder="Username" required>
-    <input id="login-password" type="password" autocomplete="current-password" placeholder="Password" required>
+    <p class="muted">Enter your access code</p>
+    <input id="login-code" type="password" autocomplete="off"
+           placeholder="ab-xxxx-xxxx-…" required>
     <button type="submit">Sign in</button>
     <p id="login-error" class="error"></p>
   </form>
@@ -27,6 +27,8 @@
     </div>
     <div class="header-actions">
       <span id="conn" class="pill">offline</span>
+      <button id="btn-sound" class="ghost" title="Enable booking alert sound">Enable sound</button>
+      <button id="btn-test-sound" class="ghost hidden">Test</button>
       <button id="btn-home" title="Open the portal page">Portal page</button>
       <button id="btn-control">Take control</button>
       <button id="btn-logout" class="ghost">Sign out</button>
@@ -45,7 +47,12 @@
       <div class="card">
         <h2>Monitoring</h2>
         <div id="monitor-status" class="muted">—</div>
+        <div id="monitor-metrics" class="muted small"></div>
         <div id="booking-status"></div>
+        <div id="booking-actions" class="hidden">
+          <button id="btn-ack">Acknowledge alert</button>
+          <button id="btn-finished" class="ghost">I completed the booking</button>
+        </div>
       </div>
       <div class="card">
         <h2>Open slots <span id="slot-count" class="muted"></span></h2>

@@ -308,6 +308,29 @@ class Store:
             self._conn.commit()
             return cur.rowcount > 0
 
+    def complete_booking(
+        self,
+        booking_id: int,
+        confirmation_ref: str,
+        finished_at: str,
+    ) -> bool:
+        """A held (needs_human) booking that was finished by hand becomes
+        `booked` — the confirmation marker was observed on the page.
+
+        Deliberately narrow: only needs_human rows transition this way (an
+        'attempted' in-flight row or 'aborted_unknown_state' still needs a
+        human decision via resolve_booking). Once booked, has_booked() blocks
+        any further claim for the profile.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE booking_log SET status='booked', stage='manual',"
+                " confirmation_ref=?, finished_at=? WHERE id=? AND status='needs_human'",
+                (confirmation_ref, finished_at, booking_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     CLAIMED_STATUSES = ("attempted", "needs_human", "booked", "aborted_unknown_state")
 
     def booking_claimed_for_slot(self, slot: dict) -> bool:

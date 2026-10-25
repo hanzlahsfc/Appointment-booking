@@ -74,10 +74,9 @@ def _cmd_add_client(args) -> int:
                 "selectors": selectors,
                 "auto_book": bool(args.auto_book),
             }
-        client = store.add_client(
+        client, code = store.add_client(
             username=args.username,
             display_name=args.name or args.username,
-            password=args.password,
             **fields,
         )
         print(
@@ -85,6 +84,7 @@ def _cmd_add_client(args) -> int:
             f"({client['display_name']}) profile={client['profile_name']} "
             f"origins={client['allowed_origins']}"
         )
+        print(f"access code (shown once — save it now): {code}")
         return 0
     except Exception as exc:
         print(f"add-client failed: {exc}", file=sys.stderr)
@@ -112,7 +112,8 @@ def _cmd_list_clients(_args) -> int:
         store.close()
 
 
-def _cmd_passwd(args) -> int:
+def _cmd_issue_code(args) -> int:
+    """Rotate a client's access code — the old one and all sessions die."""
     cfg = load_config()
     store = HostedStore(cfg.hosted.db_path, cfg.db_path)
     try:
@@ -120,8 +121,8 @@ def _cmd_passwd(args) -> int:
         if client is None:
             print(f"no such client: {args.username}", file=sys.stderr)
             return 1
-        store.set_password(client["id"], args.password)
-        print(f"password updated for {client['username']} (sessions revoked)")
+        code = store.issue_code(client["id"])
+        print(f"new access code for {client['username']} (shown once): {code}")
         return 0
     finally:
         store.close()
@@ -308,7 +309,6 @@ def _build_parser() -> argparse.ArgumentParser:
     add = sub.add_parser("add-client", help="provision a client account")
     add.add_argument("username")
     add.add_argument("--name", default=None, help="display name")
-    add.add_argument("--password", required=True)
     add.add_argument("--preset", choices=["mock"], default=None)
     add.add_argument("--profile-name", default=None)
     add.add_argument("--booking-url", default=None)
@@ -321,9 +321,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("list-clients")
 
-    pw = sub.add_parser("passwd", help="reset a client's password")
+    pw = sub.add_parser("issue-code",
+                        help="rotate a client's access code (sessions revoked)")
     pw.add_argument("username")
-    pw.add_argument("--password", required=True)
 
     for name in ("activate", "deactivate"):
         sp = sub.add_parser(name)
@@ -353,8 +353,8 @@ def main() -> int:
         return _cmd_add_client(args)
     if args.cmd == "list-clients":
         return _cmd_list_clients(args)
-    if args.cmd == "passwd":
-        return _cmd_passwd(args)
+    if args.cmd == "issue-code":
+        return _cmd_issue_code(args)
     if args.cmd == "activate":
         return _cmd_set_active(args, True)
     if args.cmd == "deactivate":

@@ -9,8 +9,8 @@ login, monitoring, assisted reservation, manual completion.
     python -m app.hosted serve --with-mock-portal --booking-mode assist --no-booking-dry-run
 
     # terminal 2 — provision + drive:
-    python -m app.hosted add-client demo --password demo-pass-123 --preset mock
-    python scripts/demo_hosted.py --username demo --password demo-pass-123 --seed "2026-12-01 09:00"
+    python -m app.hosted add-client demo --preset mock      # prints a one-time access code
+    python scripts/demo_hosted.py --code ab-... --seed "2026-12-01 09:00"
 
 Keyboard-only input is used (Tab/text/Enter) — no coordinate guessing.
 """
@@ -59,11 +59,8 @@ async def _run(args) -> int:
     ws_url = base.replace("http://", "ws://").replace("https://", "wss://")
 
     async with httpx.AsyncClient(timeout=15) as http:
-        print(f"[1] logging in as {args.username} at {base}")
-        resp = await http.post(
-            f"{base}/api/login",
-            json={"username": args.username, "password": args.password},
-        )
+        print(f"[1] exchanging access code at {base}")
+        resp = await http.post(f"{base}/api/login", json={"code": args.code})
         if resp.status_code != 200:
             print(f"    login failed: {resp.status_code} {resp.text}")
             return 1
@@ -167,20 +164,36 @@ async def _run(args) -> int:
                 print("[8] portal shows no confirmed booking — check the form fill")
                 return 1
 
+            # tell the backend we finished — it verifies the marker, then
+            # records the held attempt as booked
+            resp = await http.post(f"{base}/api/booking/complete")
+            comp = resp.json()
+            print(f"    completion check: {comp}")
+            if not comp.get("booked"):
+                print("    marker not seen — releasing control so the monitor "
+                      "verifies on its next check")
+                await _send(ws, {"type": "control", "action": "release"})
+                await _wait_msg(
+                    ws,
+                    lambda m: m.get("type") == "monitor"
+                    and m["state"].get("status") == "booked",
+                    30, "booked status",
+                )
+                print("    monitor recorded the booking as booked")
+
             records = (await http.get(f"{base}/api/records")).json()
-            held = [b for b in records["bookings"] if b["status"] == "needs_human"]
+            booked = [b for b in records["bookings"] if b["status"] == "booked"]
             print(f"    booking_log: {len(records['bookings'])} attempts "
-                  f"({len(held)} awaiting human resolution)")
+                  f"({len(booked)} booked — profile cannot book again)")
             print("\nDEMO COMPLETE — manual login -> monitoring -> assisted "
-                  "reservation -> manual completion, all through the hosted client")
+                  "reservation -> manual completion -> recorded as booked")
             return 0
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--base", default="http://127.0.0.1:8081")
-    p.add_argument("--username", required=True)
-    p.add_argument("--password", required=True)
+    p.add_argument("--code", required=True, help="the client's access code")
     p.add_argument("--seed", default=None,
                    help='"YYYY-MM-DD HH:MM" — seed a mock slot at this point')
     p.add_argument("--portal-username", default="recon@example.com")

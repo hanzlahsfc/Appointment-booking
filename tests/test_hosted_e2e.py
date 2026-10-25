@@ -51,8 +51,6 @@ import uvicorn  # noqa: E402
 from websockets.asyncio.client import connect as ws_connect  # noqa: E402
 
 PORTAL_BASE = ""  # filled by the portal fixture
-ALICE_PW = "alice-pass-1234"
-BOB_PW = "bob-pass-5678"
 
 
 class _SilentAlarm:
@@ -194,9 +192,8 @@ class WsClient:
             await self.ws.close()
 
 
-async def _login(http, base, username, password):
-    resp = await http.post(f"{base}/api/login",
-                           json={"username": username, "password": password})
+async def _login(http, base, code):
+    resp = await http.post(f"{base}/api/login", json={"code": code})
     assert resp.status_code == 200, resp.text
     return resp.json()["token"]
 
@@ -237,12 +234,12 @@ async def _flow(tmp_path: Path, portal: PortalState) -> None:
     manager = BrowserHostManager(cfg.hosted)
     await manager.start()
 
-    alice = hstore.add_client(
-        username="alice", display_name="Alice", password=ALICE_PW,
+    alice, alice_code = hstore.add_client(
+        username="alice", display_name="Alice",
         **mock_preset(PORTAL_BASE, "alice"),
     )
-    bob = hstore.add_client(
-        username="bob", display_name="Bob", password=BOB_PW,
+    bob, bob_code = hstore.add_client(
+        username="bob", display_name="Bob",
         **mock_preset(PORTAL_BASE, "bob"),
     )
     register_client_profiles(cfg, [alice, bob])
@@ -267,13 +264,13 @@ async def _flow(tmp_path: Path, portal: PortalState) -> None:
         async with httpx.AsyncClient() as http:
             # ── auth surface ──────────────────────────────────────────
             bad = await http.post(f"{base}/api/login",
-                                  json={"username": "alice", "password": "wrong"})
+                                  json={"code": "ab-0000-0000-0000-0000-0000-0000"})
             assert bad.status_code == 401
             noauth = await http.get(f"{base}/api/records")
             assert noauth.status_code == 401
 
-            token_a = await _login(http, base, "alice", ALICE_PW)
-            token_b = await _login(http, base, "bob", BOB_PW)
+            token_a = await _login(http, base, alice_code)
+            token_b = await _login(http, base, bob_code)
             headers_a = {"Authorization": f"Bearer {token_a}"}
             headers_b = {"Authorization": f"Bearer {token_b}"}
 
@@ -371,24 +368,55 @@ async def _flow(tmp_path: Path, portal: PortalState) -> None:
             bookings = state.json()["bookings"]
             assert bookings and bookings[0]["fullname"] == "Alice Applicant"
 
-            # ── records show alice's booking; input now rejected ──────
+            # ── manual completion records the booking as booked ───────
+            # The client releases; the next check sees the confirmation
+            # marker on the held page and flips needs_human -> booked.
             await alice_ws.send({"type": "control", "action": "release"})
+            await alice_ws.wait_for(
+                lambda m: m["type"] == "monitor"
+                and m["state"].get("status") == "booked",
+                timeout=30,
+            )
             records_a = (
                 await http.get(f"{base}/api/records", headers=headers_a)
             ).json()
-            assert any(b["status"] == "needs_human" for b in records_a["bookings"])
-            assert any(s["date"] == "2026-12-01" for s in records_a["slots"])
+            booked = [b for b in records_a["bookings"] if b["status"] == "booked"]
+            assert booked, records_a["bookings"]
+            assert booked[0]["confirmation_ref"]
+            # booked blocks all further claims for this profile
+            assert store.has_booked("client:alice")
 
-            # ── restart persistence: unresolved booking parks polling ─
-            open_or_unresolved = store.unresolved_booking("client:alice")
-            assert open_or_unresolved is not None
-            page_url = browser_a.page.url
+            # A second new slot must NOT produce another booking attempt.
+            n_attempts = len(records_a["bookings"])
+            await http.post(
+                f"{PORTAL_BASE}/__admin__/slots",
+                json={"date": "2026-12-20", "time": "11:00"},
+            )
+            await asyncio.sleep(6)  # at least one poll interval (2s) passes
+            records_a = (
+                await http.get(f"{base}/api/records", headers=headers_a)
+            ).json()
+            assert len(records_a["bookings"]) == n_attempts
+            assert portal.reserve_calls == 1  # never reserved again
 
-            # A "fresh" monitor (as after a restart) must refuse to navigate.
-            monitor2 = HostedMonitor(cfg, alice, store, manager, alarm=_SilentAlarm())
-            monitor2.feed = monitors[alice["id"]].feed
-            await monitor2._poll_once(browser_a, _selectors_for(alice))
-            assert browser_a.page.url == page_url  # never navigated away
+            # ── restart persistence: an unresolved booking parks polling ──
+            # Give bob an unresolved needs_human row, then a "fresh" monitor
+            # must refuse to navigate his page (the marker is absent — bob
+            # never finished a form).
+            bid = store.reserve_booking_attempt(
+                {"profile": "client:bob", "location": "lahore",
+                 "category": "national_d_employment", "date": "2026-12-22",
+                 "time": "09:00"},
+                mode="assist", started_at="2026-10-26T00:00:00+05:00",
+            )
+            store.finish_booking(bid, "needs_human", finished_at="2026-10-26T00:01:00+05:00")
+            browser_b = manager.browser_for(bob["id"])
+            bob_url = browser_b.page.url if browser_b else None
+            monitor2 = HostedMonitor(cfg, bob, store, manager, alarm=_SilentAlarm())
+            monitor2.feed = monitors[bob["id"]].feed
+            await monitor2._poll_once(browser_b, _selectors_for(bob))
+            assert monitors[bob["id"]].feed.state["status"] in ("holding",)
+            assert browser_b.page.url == bob_url  # never navigated away
 
             # ── client B isolation ────────────────────────────────────
             me_b = (await http.get(f"{base}/api/me", headers=headers_b)).json()
@@ -396,7 +424,8 @@ async def _flow(tmp_path: Path, portal: PortalState) -> None:
             records_b = (
                 await http.get(f"{base}/api/records", headers=headers_b)
             ).json()
-            assert records_b["bookings"] == []
+            # bob sees ONLY his own rows — nothing of alice's booking
+            assert all(b["date"] != "2026-12-01" for b in records_b["bookings"])
             assert all(
                 s["date"] != "2026-12-01" for s in records_b["slots"]
             )
@@ -463,8 +492,8 @@ async def _nav_guard_flow(tmp_path: Path) -> None:
     manager = BrowserHostManager(cfg.hosted)
     await manager.start()
     try:
-        client = hstore.add_client(
-            username="carol", display_name="Carol", password="carol-pass-99",
+        client, _code = hstore.add_client(
+            username="carol", display_name="Carol",
             **mock_preset(PORTAL_BASE, "carol"),
         )
         browser = await manager.ensure_browser(client)
