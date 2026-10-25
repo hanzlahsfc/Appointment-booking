@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Appointment Booker",
+  "version": "2.0.0",
+  "description": "Watches the GVCW appointment picker in your signed-in tab, alerts on new slots, and can claim one for you to finish by hand.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "alarms", "notifications", "offscreen", "tabs", "scripting"],
+  "host_permissions": [
+    "https://pk-gr-services.gvcworld.eu/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Appointment Booker", "default_popup": "popup.html" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pk-gr-services.gvcworld.eu/*",
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": ["content-portal.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

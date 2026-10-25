@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Appointment Booker</title><style>
+ body{font:13px -apple-system,"Segoe UI",sans-serif;margin:0;padding:18px;background:#0f172a;color:#e2e8f0;max-width:960px}
+ h1{font-size:18px} h2{font-size:14px;color:#94a3b8;margin:18px 0 6px}
+ .card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;margin:8px 0}
+ input,select,textarea{width:100%;box-sizing:border-box;padding:6px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;font:12px monospace}
+ button{padding:6px 12px;margin:4px 4px 4px 0;border:1px solid #2563eb;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer}
+ button.sec{background:#1e293b;border-color:#334155}
+ .ok{color:#22c55e}.err{color:#f87171}.warn{color:#fbbf24}
+ table{border-collapse:collapse;width:100%}td{padding:3px 8px 3px 0;font-size:12px}
+</style></head><body>
+<h1>Appointment Booker</h1>
+<div class="card">
+ <label><input type="checkbox" id="monitoring" style="width:auto"> Monitoring enabled</label>
+ <label>Portal tab <select id="tab"></select></label>
+ <label>Poll every <input id="pollMin" type="number" min="1" style="width:70px;display:inline"> min</label>
+ <button id="save">Save</button><button id="poll" class="sec">Poll now</button><button id="stopAlarm" class="sec">Stop alarm</button>
+</div>
+<h2>Profiles</h2><div id="profiles"></div>
+<h2>Latest slots</h2><div id="slots"></div>
+<h2>Booking attempts</h2><div id="bookings"></div>
+<h2>Alerts</h2><div id="alerts"></div>
+<div class="card">
+ <h2>Settings JSON (selectors, profiles, booking)</h2>
+ <textarea id="cfg" rows="10"></textarea>
+ <button id="saveCfg">Save JSON</button>
+ <button id="export" class="sec">Export config</button>
+ <input type="file" id="import" class="sec" style="display:inline;width:auto">
+ <button id="diag" class="sec">Export diagnostics (redacted)</button>
+</div>
+<script src="dashboard.js"></script></body></html>
