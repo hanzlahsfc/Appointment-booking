@@ -13,22 +13,39 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import re
+
 from playwright.async_api import Browser, BrowserContext
 
 from .alarm import Alarm, AlarmConfig
 from .booking import BookingAgent, BookingStatus
+from .bridge import (
+    HUB,
+    BridgeError,
+    BridgeNotConnected,
+    BridgeTimeout,
+    TabInUse,
+)
 from .browser import (
     BrowserSession,
-    IncapsulaHandler,
     create_browser,
     launch_persistent,
     new_context,
+    WAFBlocked,
+    WAFError,
 )
 from .config import Config
 from .diff import select_bookable, sort_by_date
 from .notifier import Notifier
-from .site import PlaywrightSiteDriver, load_selectors
+from .site import (
+    BridgeSiteDriver,
+    PickerMismatch,
+    PlaywrightSiteDriver,
+    SiteNotConfigured,
+    load_selectors,
+)
 from .session import (
+    SessionExpired,
     check_session_still_valid,
     ensure_logged_in,
     has_storage_state,
@@ -42,7 +59,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SLOT_SELECTOR_HINT = None  # filled by recon (§11)
+#: How often a blocked worker re-checks whether its held booking was resolved.
+BLOCKED_RECHECK_SECONDS = 30
+
+_ISO_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_DMY_DATE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b")
+_TIME = re.compile(r"\b(\d{1,2}):(\d{2})\b")
 
 # ── demo slot generation ──────────────────────────────────────────────────
 _DEMO_TIMES = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30", "14:00", "14:30"]
@@ -102,7 +124,8 @@ class CrawlerWorker:
     # ── lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        if self.demo:
+        if self.demo or self.cfg.app.driver == "bridge":
+            # bridge mode launches nothing — the operator's browser is the fleet
             return
         profile_dir = Path(self.cfg.booking.profile_dir)
         if profile_dir.exists() and any(profile_dir.iterdir()):
@@ -132,6 +155,9 @@ class CrawlerWorker:
         if self.demo:
             await self._run_demo()
             return
+        if self.cfg.app.driver == "bridge":
+            await self._run_loop(self._poll_once_bridge)
+            return
         state_path = storage_state_path(self.cfg.state_dir, self.profile["name"])
         creds_file = self.cfg.creds_dir / f"{self._slug(self.profile['name'])}.json"
         if self._session is not None:
@@ -139,15 +165,52 @@ class CrawlerWorker:
         else:
             context = await self._make_context(state_path, creds_file)
         try:
-            while True:
-                delay = jittered_delay(
+            await self._run_loop(lambda: self._poll_once_playwright(context, state_path, creds_file))
+        finally:
+            await context.close()
+
+    async def _run_loop(self, poll) -> None:
+        """Poll immediately on startup, then every interval ± jitter.
+
+        Before *any* navigation the worker checks for a booking that may still
+        be holding a slot: an unresolved hand-off, an ambiguous attempt, or an
+        in-flight attempt orphaned by a crash. While such a row exists, polling
+        stays parked — navigating the tab would disturb the held page.
+        """
+        while True:
+            reason = self._poll_block_reason()
+            if reason:
+                self._up_dash_error(reason)
+                logger.warning("polling blocked for %s: %s", self.profile["name"], reason)
+                await asyncio.sleep(BLOCKED_RECHECK_SECONDS)
+                continue
+            await poll()
+            await asyncio.sleep(
+                jittered_delay(
                     self.cfg.app.poll_interval_seconds,
                     self.cfg.app.jitter_seconds,
                 )
-                await asyncio.sleep(delay)
-                await self._poll_once(context, state_path, creds_file)
-        finally:
-            await context.close()
+            )
+
+    def _poll_block_reason(self) -> str | None:
+        """Why this worker must not navigate a tab right now, else None."""
+        name = self.profile["name"]
+        open_row = self.store.open_booking(name)
+        if open_row:
+            return (
+                f"booking attempt #{open_row['id']} for {open_row['date']} "
+                f"{open_row.get('time') or ''} never finished "
+                f"(status={open_row['status']}) — a slot may still be held; "
+                "resolve it with --resolve-booking before polling resumes"
+            )
+        unresolved = self.store.unresolved_booking(name)
+        if unresolved:
+            return (
+                f"booking attempt #{unresolved['id']} for {unresolved['date']} "
+                f"ended {unresolved['status']} — a slot may still be held; "
+                "resolve it with --resolve-booking before polling resumes"
+            )
+        return None
 
     async def _run_demo(self) -> None:
         """Demo loop: fabricate slots so the dashboard is populated."""
@@ -242,7 +305,29 @@ class CrawlerWorker:
             await ensure_logged_in(context, creds_file, self.profile["name"], state_path)
         return context
 
-    async def _poll_once(self, context: BrowserContext, state_path: Path, creds_file: Path) -> None:
+    def _load_selectors(self):
+        """Reloaded every poll: dropping in recon/booking-selectors.json after a
+        recon pass must not require a restart."""
+        return load_selectors(self.cfg.booking.selectors_file)
+
+    async def _poll_once_bridge(self) -> None:
+        """One poll through the operator's signed-in browser."""
+        t0 = time.perf_counter()
+        try:
+            client = HUB.client()
+            tab_id = self.profile.get("tab_id")
+            if tab_id is None:
+                tab_id = client.current_tab()
+            driver = BridgeSiteDriver(client, self._load_selectors(), tab_id=tab_id)
+            await self._poll_via_driver(driver)
+        except Exception as e:
+            self._up_dash_error(self._explain_error(e))
+            logger.warning(
+                "poll failed for profile %s: %s (%.1fs)",
+                self.profile["name"], self._explain_error(e), time.perf_counter() - t0,
+            )
+
+    async def _poll_once_playwright(self, context: BrowserContext, state_path: Path, creds_file: Path) -> None:
         t0 = time.perf_counter()
         try:
             page = context.pages[0] if context.pages else await context.new_page()
@@ -254,24 +339,68 @@ class CrawlerWorker:
                 await ensure_logged_in(context, creds_file, self.profile["name"], state_path)
                 await page.goto(url, wait_until="domcontentloaded")
 
-            slots = await self._fetch_slots(page)
-            dur = time.perf_counter() - t0
-            new_slots = self._process_slots(slots)
-            new_count = len(new_slots)
-            self._up_dash(new_count=new_count, slots=slots)
-            logger.info(
-                "OK | profile=%s | slots=%d | new=%d | dur=%.1fs",
-                self.profile["name"],
-                len(slots),
-                new_count,
-                dur,
-            )
-            if new_slots:
-                await self._maybe_book(page, new_slots)
+            driver = PlaywrightSiteDriver(page, self._load_selectors())
+            await self._poll_body(driver)
         except Exception as e:
-            dur = time.perf_counter() - t0
-            self._up_dash_error(str(e))
+            self._up_dash_error(self._explain_error(e))
             logger.exception("poll failed for profile %s: %s", self.profile["name"], e)
+
+    @staticmethod
+    def _explain_error(exc: Exception) -> str:
+        """Operator-facing one-liner for every expected failure mode."""
+        if isinstance(exc, BridgeNotConnected):
+            return f"extension not ready: {exc}"
+        if isinstance(exc, TabInUse):
+            return str(exc)
+        if isinstance(exc, BridgeTimeout):
+            return f"extension did not answer in time: {exc}"
+        if isinstance(exc, SessionExpired):
+            return str(exc)
+        if isinstance(exc, WAFBlocked):
+            return f"portal is blocking this browser: {exc}"
+        if isinstance(exc, WAFError):
+            return f"portal challenge did not clear: {exc}"
+        if isinstance(exc, SiteNotConfigured):
+            return f"selectors not configured: {exc}"
+        if isinstance(exc, PickerMismatch):
+            return str(exc)
+        if isinstance(exc, BridgeError):
+            return f"extension error: {exc}"
+        return f"{type(exc).__name__}: {exc}"
+
+    async def _poll_via_driver(self, driver) -> None:
+        """Poll using a bridge-backed driver. Claims the tab for the whole poll
+        so a second worker cannot navigate it mid-operation — including while
+        a booking is held for human hand-off."""
+        HUB.claim_tab(driver.tab_id, self.profile["name"])
+        try:
+            await self._poll_body(driver)
+        finally:
+            HUB.release_tab(driver.tab_id, self.profile["name"])
+
+    async def _poll_body(self, driver) -> None:
+        """The shared poll: navigate → verify session → scrape → diff → act.
+
+        Reaching _process_slots means the picker applied our filters, so its
+        results (including 'no rows') are trustworthy — see apply_filters.
+        """
+        t0 = time.perf_counter()
+        await driver.open_booking_page(self.profile["booking_url"])
+        await driver.wait_for_waf()
+        if await driver.is_login_page():
+            raise SessionExpired(
+                "the portal bounced to sign-in — log in again in the driven tab"
+            )
+        slots = await self._fetch_slots(driver)
+        dur = time.perf_counter() - t0
+        new_slots = self._process_slots(slots)
+        self._up_dash(new_count=len(new_slots), slots=slots)
+        logger.info(
+            "OK | profile=%s | slots=%d | new=%d | dur=%.1fs",
+            self.profile["name"], len(slots), len(new_slots), dur,
+        )
+        if new_slots:
+            await self._maybe_book(driver, new_slots)
 
     def _process_slots(self, slots: list[dict]) -> list[dict]:
         """Returns list of NEW (alertable) slots for this poll."""
@@ -289,9 +418,10 @@ class CrawlerWorker:
             return unseen
 
         new_slots = self.store.upsert_slots(slots, seen_at=now)
-        scope = {(s["date"], s["time"]) for s in slots}
-        if scope:
-            self.store.deactivate_missing(
+        # Reaching here means the picker's filters verified — an empty scrape
+        # is a real "no slots", not a broken page, so deactivation is safe.
+        scope = {(s["date"], s["time"] or "") for s in slots}
+        self.store.deactivate_missing(
                 self.profile["name"],
                 self.profile["location"],
                 self.profile["category"],
@@ -316,6 +446,7 @@ class CrawlerWorker:
             if self.dashboard:
                 self.dashboard.push_alert(slot, "dry-run")
             return
+        self.store.mark_alert_attempted([slot])
         ok = await self.notifier.send(slot, auto_book=self.cfg.booking.mode != "off")
         sent_at = iso_pkt(now_pkt())
         subject = self.notifier.build_subject(slot)
@@ -327,12 +458,12 @@ class CrawlerWorker:
 
     # ── auto-booking ──────────────────────────────────────────────────────
 
-    async def _maybe_book(self, page, new_slots: list[dict]) -> None:
+    async def _maybe_book(self, driver, new_slots: list[dict]) -> None:
         """Claim the best new slot if this profile opted in.
 
-        Runs inline (awaited) rather than as a background task: one Playwright
-        page cannot be driven concurrently, and the next poll must not navigate
-        away from a slot we are holding for a human.
+        Runs inline (awaited) rather than as a background task: one tab cannot
+        be driven concurrently, and the next poll must not navigate away from a
+        slot we are holding for a human.
         """
         if not self.cfg.booking_enabled_for(self.profile["name"]):
             return
@@ -341,7 +472,6 @@ class CrawlerWorker:
             logger.info("booking on, but no slot matched this profile's preferences")
             return
 
-        driver = PlaywrightSiteDriver(page, load_selectors(self.cfg.booking.selectors_file))
         agent = BookingAgent(
             self.cfg,
             self.profile,
@@ -351,10 +481,10 @@ class CrawlerWorker:
             notifier=self.notifier,
         )
         result = await agent.book(slot, driver)
-        if result.status == BookingStatus.NEEDS_HUMAN.value:
-            await self._hold_for_human(result)
-        elif result.status == BookingStatus.ABORTED_UNKNOWN_STATE.value:
-            # never walk away from a possibly-held slot
+        # Never let the next poll navigate away from a slot that may be held.
+        # `claimed` covers needs_human and aborted_unknown_state; a booked slot
+        # needs no further polling either, but it must not sit in the hold loop.
+        if result.claimed and result.status != BookingStatus.BOOKED.value:
             await self._hold_for_human(result)
 
     async def _hold_for_human(self, result) -> None:
@@ -376,30 +506,24 @@ class CrawlerWorker:
 
     # ── slot extraction (recon-driven, §11) ──────────────────────────────
 
-    async def _fetch_slots(self, page) -> list[dict]:
-        inc = IncapsulaHandler()
-        await inc.wait_for_clear(page)
-        raw_slots = await self._scrape_dom(page)
-        return self._normalize_raw_slots(raw_slots)
+    async def _fetch_slots(self, driver) -> list[dict]:
+        """Verified scrape: filters applied or we do not trust the rows."""
+        selectors = driver.selectors
+        if selectors is None or not selectors.configured or not selectors.slot_row:
+            raise SiteNotConfigured(
+                "monitoring selectors are not configured — run recon.py and "
+                "fill recon/booking-selectors.json"
+            )
+        await driver.apply_filters(self.profile["location"], self.profile["category"])
+        rows = await driver.list_slots()
+        return self._normalize_raw_slots(rows)
 
-    async def _scrape_dom(self, page) -> list[dict]:
-        harvested = []
-        try:
-            rows = page.locator(SLOT_SELECTOR_HINT or ".slot-row")
-            count = await rows.count()
-            for i in range(count):
-                text = (await rows.nth(i).inner_text()).strip()
-                if text:
-                    harvested.append({"raw": text})
-        except Exception:
-            harvested = []
-        return harvested
-
-    def _normalize_raw_slots(self, raw: list[dict]) -> list[dict]:
+    def _normalize_raw_slots(self, rows: list[str]) -> list[dict]:
         out = []
-        for item in raw:
-            parsed = self._parse_slot_label(item.get("raw", ""))
+        for raw in rows:
+            parsed = self._parse_slot_label(raw)
             if parsed is None:
+                logger.debug("unparsed slot row, skipped: %r", raw[:80])
                 continue
             date_str, time_str = parsed
             out.append(
@@ -409,19 +533,32 @@ class CrawlerWorker:
                     "category": self.profile["category"],
                     "date": date_str,
                     "time": time_str,
-                    "raw": item.get("raw", ""),
+                    "raw": raw,
                 }
             )
         return out
 
-    def _parse_slot_label(self, raw: str) -> tuple[str, str] | None:
-        parts = raw.split()
-        if not parts:
-            return None
-        date_str = parts[0]
-        time_str = parts[1] if len(parts) > 1 and ":" in parts[1] else None
-        if len(date_str) != 10:
-            return None
+    @staticmethod
+    def _parse_slot_label(raw: str) -> tuple[str, str] | None:
+        """Extract (YYYY-MM-DD, HH:MM|None) from a slot row's text.
+
+        Accepts ISO dates anywhere in the label plus DD.MM.YYYY / DD/MM/YYYY;
+        sanity-checks month/day so a stray number cannot masquerade as a date.
+        """
+        m = _ISO_DATE.search(raw)
+        if m:
+            date_str = m.group(1)
+        else:
+            m = _DMY_DATE.search(raw)
+            if not m:
+                return None
+            day, month, year = (int(g) for g in m.groups())
+            year += 2000 if year < 100 else 0
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                return None
+            date_str = f"{year:04d}-{month:02d}-{day:02d}"
+        t = _TIME.search(raw)
+        time_str = f"{int(t.group(1)):02d}:{t.group(2)}" if t else None
         return date_str, time_str
 
     def _slug(self, name: str) -> str:

@@ -21,6 +21,11 @@ class LoginError(Exception):
     pass
 
 
+class SessionExpired(RuntimeError):
+    """The portal bounced back to sign-in. In bridge mode only the operator can
+    fix this — reCAPTCHA and credentials are theirs, not the agent's."""
+
+
 def load_credentials(path: str | Path) -> dict:
     """Load <data>/creds/<profile>.json — {username, password}."""
     p = Path(path)

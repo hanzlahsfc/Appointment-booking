@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 
 
+VALID_DRIVERS = ("bridge", "playwright")
+
+
 @dataclass
 class AppConfig:
     poll_interval_seconds: int = 300
@@ -20,6 +23,9 @@ class AppConfig:
     timezone: str = "Asia/Karachi"
     dry_run: bool = False
     headless: bool = True
+    # "bridge": drive the operator's signed-in browser via the extension.
+    # "playwright": launch our own Chromium (storage_state login fallback).
+    driver: str = "bridge"
 
 
 VALID_BOOKING_MODES = ("off", "assist", "auto")
@@ -57,6 +63,9 @@ class ProfileConfig:
     auto_book: bool = False
     applicant_file: str | None = None
     prefer: dict[str, Any] = field(default_factory=dict)
+    # In bridge mode: pin this profile to a specific Chrome tab id. When unset
+    # the worker drives whichever tab the operator picked in the popup.
+    tab_id: int | None = None
 
 
 @dataclass
@@ -144,6 +153,10 @@ def load_config(path: str | Path | None = None) -> Config:
     app_raw = raw.get("app", {}) or {}
     notif_raw = raw.get("notifications", {}) or {}
 
+    driver = str(app_raw.get("driver", "bridge")).strip().lower()
+    if driver not in VALID_DRIVERS:
+        raise ValueError(f"app.driver must be one of {VALID_DRIVERS}, got {driver!r}")
+
     app = AppConfig(
         poll_interval_seconds=int(app_raw.get("poll_interval_seconds", 300)),
         jitter_seconds=int(app_raw.get("jitter_seconds", 30)),
@@ -151,6 +164,7 @@ def load_config(path: str | Path | None = None) -> Config:
         timezone=app_raw.get("timezone", "Asia/Karachi"),
         dry_run=_parse_bool(app_raw.get("dry_run", False), False),
         headless=_parse_bool(app_raw.get("headless", True), True),
+        driver=driver,
     )
 
     default_username_env = app_raw.get("username_env", "USERNAME")
@@ -173,6 +187,7 @@ def load_config(path: str | Path | None = None) -> Config:
             auto_book=_parse_bool(p.get("auto_book", False), False),
             applicant_file=(str(p["applicant_file"]) if p.get("applicant_file") else None),
             prefer=dict(p.get("prefer", {}) or {}),
+            tab_id=(int(p["tab_id"]) if p.get("tab_id") is not None else None),
         )
         for i, p in enumerate(raw.get("profiles", []) or [])
     ]

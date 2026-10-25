@@ -36,6 +36,15 @@ class SlotNotFound(RuntimeError):
     """The slot we meant to claim is no longer offered."""
 
 
+class PickerMismatch(RuntimeError):
+    """The picker's VAC/category controls did not accept the profile's values.
+
+    Raised instead of scraping whatever the page happens to show: rows from a
+    different visa category or VAC would produce alerts — and bookings — for an
+    appointment the profile never asked for.
+    """
+
+
 @dataclass
 class BookingSelectors:
     login_url: str = LOGIN_URL
@@ -99,6 +108,9 @@ class SiteDriver(Protocol):
 
     async def open_booking_page(self, url: str) -> None: ...
     async def wait_for_waf(self) -> None: ...
+    async def is_login_page(self) -> bool: ...
+    async def apply_filters(self, location: str | None, category: str | None) -> None: ...
+    async def list_slots(self) -> list[str]: ...
     async def locate(self, slot: dict) -> bool: ...
     async def reserve(self, slot: dict) -> None: ...
     async def read_tokens(self) -> dict[str, str]: ...
@@ -135,16 +147,80 @@ class PlaywrightSiteDriver:
             pass
         await location.select_option(label=value, timeout=8_000)
 
-    async def locate(self, slot: dict) -> bool:
+    async def is_login_page(self) -> bool:
+        # The booking URL itself contains "/login/appointments", so the URL is
+        # not a reliable signal — a rendered password field is.
+        try:
+            return await self.page.locator("input[type=password]").count() > 0
+        except Exception:
+            return False
+
+    async def apply_filters(self, location: str | None, category: str | None) -> None:
+        """Set the picker's VAC/category selects AND verify they took.
+
+        Verification is what makes an empty or wrong scrape meaningful: if the
+        requested option is not offered, the rows on screen belong to a
+        different category/VAC and must not be trusted.
+        """
         self._require_configured()
-        if self.selectors.vac_select and slot.get("location"):
-            await self._select(self.selectors.vac_select, str(slot["location"]))
-        if self.selectors.category_select and slot.get("category"):
-            await self._select(self.selectors.category_select, str(slot["category"]))
+        if self.selectors.vac_select and location:
+            await self._select_and_verify(self.selectors.vac_select, str(location), "VAC")
+        if self.selectors.category_select and category:
+            await self._select_and_verify(self.selectors.category_select, str(category), "category")
         try:
             await self.page.wait_for_load_state("networkidle", timeout=15_000)
         except Exception:
             pass
+
+    async def _select_and_verify(self, selector: str, value: str, label: str) -> None:
+        select = self.page.locator(selector).first
+        try:
+            if await select.count() == 0:
+                raise PickerMismatch(
+                    f"{label} select {selector!r} not on the page — wrong page or stale selectors"
+                )
+            await self._select(selector, value)
+        except PickerMismatch:
+            raise
+        except Exception as exc:
+            options = await self._select_options(selector)
+            raise PickerMismatch(
+                f"{label} {value!r} is not offered — options are {options}"
+            ) from exc
+        try:
+            actual = await select.input_value(timeout=5_000)
+            chosen = await select.locator("option:checked").first.inner_text(timeout=5_000)
+        except Exception:
+            return  # cannot read back; the select_option already accepted
+        if actual != value and (chosen or "").strip() != value:
+            options = await self._select_options(selector)
+            raise PickerMismatch(
+                f"{label} {value!r} did not apply — options are {options}"
+            )
+
+    async def _select_options(self, selector: str) -> list[str]:
+        try:
+            return [
+                t.strip() for t in await self.page.locator(selector).locator("option").all_inner_texts()
+            ]
+        except Exception:
+            return []
+
+    async def list_slots(self) -> list[str]:
+        """Raw inner_text of every slot row currently shown by the picker."""
+        self._require_configured()
+        if not self.selectors.slot_row:
+            raise SiteNotConfigured("slot_row is not configured")
+        rows = self.page.locator(self.selectors.slot_row)
+        out = []
+        for i in range(await rows.count()):
+            text = (await rows.nth(i).inner_text()).strip()
+            if text:
+                out.append(text)
+        return out
+
+    async def locate(self, slot: dict) -> bool:
+        await self.apply_filters(slot.get("location"), slot.get("category"))
         return await self._find_row(slot) is not None
 
     async def _find_row(self, slot: dict):
@@ -259,7 +335,19 @@ class BridgeSiteDriver:
     ):
         self.client = client
         self.selectors = selectors
-        self.tab_id = tab_id if tab_id is not None else client.tab_id
+        self._pinned_tab = tab_id
+
+    @property
+    def tab_id(self) -> int:
+        """The tab to drive: explicitly pinned, else the operator's selection.
+
+        Resolved per call rather than snapshotted in __init__, because the
+        operator can change the tab in the extension popup at any time and a
+        stale id would silently command the wrong tab.
+        """
+        if self._pinned_tab is not None:
+            return self._pinned_tab
+        return self.client.current_tab()
 
     # ── primitives ───────────────────────────────────────────────────────
 
@@ -339,13 +427,57 @@ class BridgeSiteDriver:
                     f"the portal returned the block shell ({marker}) for this tab"
                 )
 
-    async def locate(self, slot: dict) -> bool:
+    async def is_login_page(self) -> bool:
+        # The booking URL itself contains "/login/appointments", so the URL is
+        # not a reliable signal — a rendered password field is.
+        return bool(await self._eval("!!document.querySelector('input[type=password]')"))
+
+    async def apply_filters(self, location: str | None, category: str | None) -> None:
+        """Set the picker's VAC/category selects AND verify they took."""
         require_configured(self.selectors)
-        if self.selectors.vac_select:
-            await self._set_field(self.selectors.vac_select, slot.get("location"))
-        if self.selectors.category_select:
-            await self._set_field(self.selectors.category_select, slot.get("category"))
+        if self.selectors.vac_select and location:
+            await self._apply_select(self.selectors.vac_select, str(location), "VAC")
+        if self.selectors.category_select and category:
+            await self._apply_select(self.selectors.category_select, str(category), "category")
         await self._wait_ready(timeout=15)
+
+    async def _apply_select(self, selector: str, value: str, label: str) -> None:
+        result = await self._eval(
+            "(() => { const el = document.querySelector(%s);"
+            " if (!el || !el.options) return {found:false};"
+            " const want = %s;"
+            " const opt = [...el.options].find(o => o.value === want || (o.text||'').trim() === want);"
+            " if (!opt) return {found:true, applied:false,"
+            "   options:[...el.options].map(o => (o.text||'').trim()).filter(Boolean)};"
+            " el.value = opt.value;"
+            " el.dispatchEvent(new Event('input',{bubbles:true}));"
+            " el.dispatchEvent(new Event('change',{bubbles:true}));"
+            " return {found:true, applied:true}; })()"
+            % (_js_string(selector), _js_string(value))
+        )
+        if not isinstance(result, dict) or not result.get("found"):
+            raise PickerMismatch(
+                f"{label} select {selector!r} not found on the page — wrong page or stale selectors"
+            )
+        if not result.get("applied"):
+            raise PickerMismatch(
+                f"{label} {value!r} is not offered — options are {result.get('options') or []}"
+            )
+
+    async def list_slots(self) -> list[str]:
+        """Raw inner_text of every slot row currently shown by the picker."""
+        require_configured(self.selectors)
+        if not self.selectors.slot_row:
+            raise SiteNotConfigured("slot_row is not configured")
+        rows = await self._eval(
+            "[...document.querySelectorAll(%s)]"
+            ".map(e => (e.innerText||'').trim()).filter(Boolean)"
+            % _js_string(self.selectors.slot_row)
+        )
+        return list(rows or [])
+
+    async def locate(self, slot: dict) -> bool:
+        await self.apply_filters(slot.get("location"), slot.get("category"))
         found = await self._eval(self._row_js(slot, "return true;"))
         return bool(found)
 

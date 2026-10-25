@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS slot_state (
     first_seen TEXT NOT NULL,
     last_seen  TEXT NOT NULL,
     alerted    INTEGER NOT NULL DEFAULT 0,
+    alert_attempted INTEGER NOT NULL DEFAULT 0,
     active     INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (profile, location, category, date, time)
 );
@@ -66,23 +67,49 @@ class Store:
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Idempotent upgrades for DBs created by older builds."""
+        cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(slot_state)")
+        }
+        if "alert_attempted" not in cols:
+            self._conn.execute(
+                "ALTER TABLE slot_state ADD COLUMN alert_attempted INTEGER NOT NULL DEFAULT 0"
+            )
+        # NULL times defeat the composite primary key (NULL != NULL), so a slot
+        # reported once with a time and once without created two rows and could
+        # double-alert. Empty string is the canonical "no time" marker.
+        self._conn.execute("UPDATE slot_state SET time='' WHERE time IS NULL")
+
+    @staticmethod
+    def _norm_time(value) -> str:
+        return "" if value is None else str(value)
 
     def upsert_slots(self, slots: Iterable[dict], seen_at: str) -> list[dict]:
         """Refresh slot rows and return slots that warrant an alert.
 
         A slot warrants an alert when it appears in the current poll and:
           - was never seen before, OR
-          - disappeared (active=0) and was never alerted before.
+          - disappeared (active=0) and was never alerted before, OR
+          - its alert was attempted but never delivered (alert_attempted=1,
+            alerted=0) — a failed email is retried on the next poll instead of
+            being silently dropped while the slot sits there.
         Slots already alerted never alert again, even if they re-appear.
         """
         conn = self._conn
         new_slots: list[dict] = []
         with self._lock:
             for s in slots:
-                key = (s["profile"], s["location"], s["category"], s["date"], s["time"])
+                key = (
+                    s["profile"], s["location"], s["category"], s["date"],
+                    self._norm_time(s.get("time")),
+                )
                 row = conn.execute(
-                    "SELECT alerted, active FROM slot_state WHERE profile=? AND location=? AND category=? AND date=? AND time=?",
+                    "SELECT alerted, alert_attempted, active FROM slot_state WHERE profile=? AND location=? AND category=? AND date=? AND time=?",
                     key,
                 ).fetchone()
                 if row is None:
@@ -90,10 +117,10 @@ class Store:
                     conn.execute(
                         "INSERT INTO slot_state (profile, location, category, date, time, raw, first_seen, last_seen, alerted, active)"
                         " VALUES (?,?,?,?,?,?,?,?,0,1)",
-                        (s["profile"], s["location"], s["category"], s["date"], s["time"], s.get("raw"), seen_at, seen_at),
+                        (s["profile"], s["location"], s["category"], s["date"], self._norm_time(s.get("time")), s.get("raw"), seen_at, seen_at),
                     )
                 else:
-                    if not row["active"] and not row["alerted"]:
+                    if not row["alerted"] and (not row["active"] or row["alert_attempted"]):
                         new_slots.append(s)
                     conn.execute(
                         "UPDATE slot_state SET last_seen=?, raw=?, active=1 WHERE profile=? AND location=? AND category=? AND date=? AND time=?",
@@ -119,8 +146,9 @@ class Store:
                 "WHERE profile=? AND location=? AND category=? AND active=1",
                 (profile, location, category),
             ).fetchall()
+            present = {(d, self._norm_time(t)) for d, t in present_keys}
             for r in active_rows:
-                if (r["date"], r["time"]) not in present_keys:
+                if (r["date"], r["time"]) not in present:
                     conn.execute(
                         "UPDATE slot_state SET active=0, last_seen=? "
                         "WHERE profile=? AND location=? AND category=? AND date=? AND time=?",
@@ -128,13 +156,27 @@ class Store:
                     )
             conn.commit()
 
+    def mark_alert_attempted(self, slots: Iterable[dict]) -> None:
+        """Record that a send was attempted, before knowing the outcome.
+
+        This is what makes a failed send retryable: the slot stays
+        alerted=0/alert_attempted=1 and the next poll returns it again.
+        """
+        with self._lock:
+            for s in slots:
+                self._conn.execute(
+                    "UPDATE slot_state SET alert_attempted=1 WHERE profile=? AND location=? AND category=? AND date=? AND time=?",
+                    (s["profile"], s["location"], s["category"], s["date"], self._norm_time(s.get("time"))),
+                )
+            self._conn.commit()
+
     def mark_alerted(self, new_slots: Iterable[dict]) -> None:
         conn = self._conn
         with self._lock:
             for s in new_slots:
                 conn.execute(
                     "UPDATE slot_state SET alerted=1 WHERE profile=? AND location=? AND category=? AND date=? AND time=? AND alerted=0",
-                    (s["profile"], s["location"], s["category"], s["date"], s["time"]),
+                    (s["profile"], s["location"], s["category"], s["date"], self._norm_time(s.get("time"))),
                 )
             conn.commit()
 
@@ -187,7 +229,7 @@ class Store:
                         status,
                         "claim",
                         started_at,
-                    ),
+                    ),  # booking_log keeps time as stored (NULL-safe via IFNULL in lookups)
                 )
                 self._conn.commit()
                 return int(cur.lastrowid)
@@ -243,17 +285,25 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
-    def resolve_booking(self, booking_id: int, resolved_status: str = "resolved") -> bool:
+    def resolve_booking(
+        self,
+        booking_id: int,
+        resolved_status: str = "resolved",
+        resolved_at: str = "",
+    ) -> bool:
         """Mark a held/ambiguous attempt as reviewed by a human.
 
-        Returns False when the row is not in an unresolved state, so a mistyped
-        id cannot silently "resolve" a booked appointment.
+        Covers 'attempted' rows too: an attempt orphaned by a crash stays
+        in-flight forever (finished_at IS NULL) and blocks the profile; the
+        operator reviews it and resolves it here. Setting finished_at frees the
+        booking_open_uniq claim. Returns False when the row is not in a
+        resolvable state, so a mistyped id cannot silently clear a booking.
         """
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE booking_log SET status=? WHERE id=?"
-                " AND status IN ('needs_human','aborted_unknown_state')",
-                (resolved_status, booking_id),
+                "UPDATE booking_log SET status=?, finished_at=COALESCE(finished_at, ?) WHERE id=?"
+                " AND status IN ('needs_human','aborted_unknown_state','attempted')",
+                (resolved_status, resolved_at, booking_id),
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -306,7 +356,7 @@ class Store:
             self._conn.execute(
                 "UPDATE slot_state SET alerted=1 WHERE profile=? AND location=? AND category=?"
                 " AND date=? AND time=?",
-                (slot["profile"], slot["location"], slot["category"], slot["date"], slot.get("time")),
+                (slot["profile"], slot["location"], slot["category"], slot["date"], self._norm_time(slot.get("time"))),
             )
             self._conn.commit()
 

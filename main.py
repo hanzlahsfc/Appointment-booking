@@ -21,6 +21,7 @@ from app.crawler import CrawlerWorker
 from app.dashboard import DashboardState
 from app.notifier import Notifier
 from app.store import Store
+from app.util import iso_pkt, now_pkt
 from app.web import app as fastapi_app, bind as bind_dashboard
 
 logger = logging.getLogger("gvcw")
@@ -51,7 +52,70 @@ def _parse_args() -> argparse.Namespace:
         help="Override app.booking.mode for this run",
     )
     p.add_argument("--skip-preflight", action="store_true", help="Skip the egress reachability check")
+    p.add_argument(
+        "--list-bookings",
+        action="store_true",
+        help="List recent booking attempts (open/unresolved highlighted) and exit",
+    )
+    p.add_argument(
+        "--resolve-booking",
+        type=int,
+        metavar="ID",
+        help="Mark a held/uncertain booking attempt as reviewed, then exit",
+    )
     return p.parse_args()
+
+
+def _booking_admin(cfg, args) -> int:
+    """Operator workflow for resolving held/uncertain bookings.
+
+    A needs_human / aborted_unknown_state / stale in-flight attempt blocks its
+    profile (a slot may still be held). After checking the portal by hand, the
+    operator resolves the row here; polling and booking then resume.
+    """
+    store = Store(cfg.db_path)
+    try:
+        if args.list_bookings:
+            rows = store.recent_bookings(50)
+            if not rows:
+                print("no booking attempts recorded")
+                return 0
+            for r in rows:
+                marker = ""
+                if r["finished_at"] is None:
+                    marker = "  <== IN FLIGHT (stale if the app is not running)"
+                elif r["status"] in ("needs_human", "aborted_unknown_state"):
+                    marker = "  <== UNRESOLVED"
+                print(
+                    f"#{r['id']:>4} {r['status']:<24} {r['profile']} | "
+                    f"{r['category']} @ {r['location']} {r['date']} {r.get('time') or ''} "
+                    f"| stage={r.get('stage')}{marker}"
+                )
+            return 0
+        resolved = store.resolve_booking(
+            args.resolve_booking, resolved_at=iso_pkt(now_pkt())
+        )
+        if resolved:
+            print(
+                f"attempt #{args.resolve_booking} resolved — "
+                "its profile may poll and book again"
+            )
+            return 0
+        row = next(
+            (r for r in store.recent_bookings(200) if r["id"] == args.resolve_booking),
+            None,
+        )
+        detail = (
+            f"status={row['status']}" if row else "no such attempt"
+        )
+        print(
+            f"attempt #{args.resolve_booking} is not resolvable ({detail}); "
+            "only needs_human / aborted_unknown_state / in-flight rows can be resolved",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        store.close()
 
 
 async def _preflight(cfg) -> None:
@@ -87,6 +151,7 @@ def _profiles_as_dicts(cfg):
             "auto_book": p.auto_book,
             "applicant_file": p.applicant_file,
             "prefer": p.prefer,
+            "tab_id": p.tab_id,
         }
 
 
@@ -94,6 +159,8 @@ async def main() -> int:
     setup_logging()
     args = _parse_args()
     cfg = load_config()
+    if args.list_bookings or args.resolve_booking is not None:
+        return _booking_admin(cfg, args)
     if args.no_book:
         cfg.booking.mode = "off"
     elif args.booking_mode:
@@ -209,12 +276,16 @@ async def _run_workers(
     pending = set(tasks)
     try:
         while pending:
-            done, pending = await asyncio.wait(
+            # stop_wait is awaited alongside but is NOT bookkeeping: leaving it
+            # in `pending` would mean the set never empties and "all workers
+            # exited" could never be detected.
+            done, still = await asyncio.wait(
                 pending | {stop_wait}, return_when=asyncio.FIRST_COMPLETED
             )
+            pending = still - {stop_wait}
             if stop_wait in done:
                 break
-            for t in done:
+            for t in done - {stop_wait}:
                 if t.cancelled():
                     continue
                 exc = t.exception()

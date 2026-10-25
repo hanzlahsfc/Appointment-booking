@@ -35,8 +35,10 @@ from app.config import (  # noqa: E402
 from app.site import BookingSelectors, PlaywrightSiteDriver  # noqa: E402
 from app.store import Store  # noqa: E402
 
-PORT = 8099
-BASE = f"http://127.0.0.1:{PORT}"
+# Port is allocated per test run — a hardcoded one collides with anything else
+# already bound (including a stray dev server), which is exactly what an earlier
+# run hit. BASE is filled in by the module-scoped `portal` fixture.
+BASE = ""
 PROFILE_NAME = "Ahmed - Work Permit"
 
 
@@ -55,29 +57,34 @@ class _RecordingAlarm:
         pass
 
 
-def _serve(app, port: int):
+def _serve(app):
+    """Bind on an OS-assigned port; return (server, port, thread)."""
     import uvicorn
 
     server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False)
+        uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", access_log=False)
     )
-    threading.Thread(target=server.run, daemon=True).start()
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
     deadline = time.time() + 20
     while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                return server
-        except OSError:
-            time.sleep(0.1)
+        if server.started and server.servers:
+            port = server.servers[0].sockets[0].getsockname()[1]
+            return server, port, thread
+        time.sleep(0.05)
+    server.should_exit = True
     raise RuntimeError("mock portal did not start")
 
 
 @pytest.fixture(scope="module")
 def portal():
+    global BASE
     state = PortalState()
-    server = _serve(create_app(state), PORT)
+    server, port, thread = _serve(create_app(state))
+    BASE = f"http://127.0.0.1:{port}"
     yield state
     server.should_exit = True
+    thread.join(timeout=10)
 
 
 def _cfg(tmp_path: Path, mode: str) -> Config:
