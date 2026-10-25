@@ -14,6 +14,37 @@ It can also **claim the slot for you**. In `assist` mode (the recommended live s
 
 ---
 
+## Driving your own browser (default)
+
+`app.driver: "bridge"` (default) makes workers drive the browser **you are
+already signed into** through the bundled Chrome extension (`extension/`),
+over a loopback WebSocket the extension dials — no Playwright login, no
+reCAPTCHA, no storage_state.
+
+1. Load `extension/` at `chrome://extensions` (Developer mode → Load unpacked).
+2. Sign in to the GVCW portal in a tab you dedicate to the agent.
+3. Start the crawler (`python main.py`), open the extension popup, pick that
+   tab, press **Connect**.
+4. Optional: set `AB_BRIDGE_TOKEN` on the crawler env and enter it in the
+   popup — the bridge then requires the shared secret.
+5. `app.driver: "playwright"` falls back to the old own-Chromium path.
+
+Each profile may pin `tab_id:` in `config.yaml`; otherwise workers use the
+popup-selected tab. The hub refuses concurrent use of one tab (a held booking
+keeps its tab until resolved).
+
+## Resolving a held or uncertain booking
+
+`needs_human`, `aborted_unknown_state`, and crashed in-flight attempts park
+the profile — a slot may still be held. After checking the portal by hand:
+
+```bash
+python main.py --list-bookings          # see open/unresolved attempts
+python main.py --resolve-booking <id>   # human reviewed → profile resumes
+```
+
+---
+
 ## Quick start
 
 ### 1. Install
