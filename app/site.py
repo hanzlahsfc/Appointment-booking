@@ -9,18 +9,23 @@ clicking blindly: guessing on a visa portal can book the wrong appointment.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from playwright.async_api import Page
 
-from .browser import IncapsulaHandler
+from .bridge import BridgeClient, BridgeError, BridgeNotConnected
+from .browser import IncapsulaHandler, WAFBlocked
 from .session import LOGIN_URL
 
 logger = logging.getLogger(__name__)
+
+WAF_BLOCK_MARKERS = ("access denied", "error 17", "incapsula incident")
 
 
 class SiteNotConfigured(RuntimeError):
@@ -79,6 +84,16 @@ def load_selectors(path: str | Path) -> BookingSelectors:
     return BookingSelectors(**clean)
 
 
+def require_configured(selectors: BookingSelectors) -> None:
+    """Refuse to act while the selectors are unknown — never guess on a portal."""
+    if not selectors.configured:
+        raise SiteNotConfigured(
+            "booking selectors are not configured (missing: "
+            + ", ".join(selectors.missing)
+            + "). Run recon.py and fill recon/booking-selectors.json."
+        )
+
+
 class SiteDriver(Protocol):
     """The surface BookingAgent drives. Faking this keeps the agent testable."""
 
@@ -102,12 +117,7 @@ class PlaywrightSiteDriver:
         self.selectors = selectors
 
     def _require_configured(self) -> None:
-        if not self.selectors.configured:
-            raise SiteNotConfigured(
-                "booking selectors are not configured (missing: "
-                + ", ".join(self.selectors.missing)
-                + "). Run recon.py and fill recon/booking-selectors.json."
-            )
+        require_configured(self.selectors)
 
     async def open_booking_page(self, url: str) -> None:
         await self.page.goto(url, wait_until="domcontentloaded", timeout=45_000)
@@ -223,3 +233,183 @@ class PlaywrightSiteDriver:
 
     async def content(self) -> str:
         return await self.page.content()
+
+
+def _js_string(value: Any) -> str:
+    """A safe JS string literal (never build selectors by concatenation)."""
+    return json.dumps("" if value is None else str(value))
+
+
+class BridgeSiteDriver:
+    """Drives the tab the operator picked, through our browser extension.
+
+    This is the professionally interesting one: it operates the browser the
+    consultant is *already signed into*, so the Imperva challenge is long
+    cleared and no reCAPTCHA login is needed. Clicks are dispatched as real
+    mouse events at the element's centre rather than JS `.click()`, because a
+    form may only react to trusted events. The extension shows a
+    "debugging this browser" banner while attached, which is honest and expected.
+    """
+
+    def __init__(
+        self,
+        client: BridgeClient,
+        selectors: BookingSelectors,
+        tab_id: int | None = None,
+    ):
+        self.client = client
+        self.selectors = selectors
+        self.tab_id = tab_id if tab_id is not None else client.tab_id
+
+    # ── primitives ───────────────────────────────────────────────────────
+
+    async def _eval(self, expression: str, timeout: float = 30.0) -> Any:
+        return await self.client.evaluate(expression, self.tab_id, timeout)
+
+    async def _click_at(self, rect: dict) -> None:
+        x, y = rect["x"], rect["y"]
+        for params in (
+            {"type": "mouseMoved", "x": x, "y": y, "button": "none"},
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+        ):
+            await self.client.command("Input.dispatchMouseEvent", params, self.tab_id)
+
+    @staticmethod
+    def _rect_js(element_expression: str) -> str:
+        return (
+            "(() => { const el = %s; if (!el) return null;"
+            " el.scrollIntoView({block:'center'});"
+            " const r = el.getBoundingClientRect();"
+            " if (!r.width && !r.height) return null;"
+            " return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()"
+            % element_expression
+        )
+
+    def _row_js(self, slot: dict, body: str) -> str:
+        """Bind `row` to the matching slot row, then run `body`."""
+        return (
+            "(() => { const rows = [...document.querySelectorAll(%s)];"
+            " const d = %s, t = %s;"
+            " const row = rows.find(r => r.innerText.includes(d)"
+            " && (!t || r.innerText.includes(t)));"
+            " if (!row) return null; %s })()"
+            % (
+                _js_string(self.selectors.slot_row or ""),
+                _js_string(slot.get("date") or ""),
+                _js_string(slot.get("time") or ""),
+                body,
+            )
+        )
+
+    async def _wait_ready(self, timeout: float = 30.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if await self._eval("document.readyState", timeout=10) == "complete":
+                    return
+            except BridgeError:
+                pass
+            await asyncio.sleep(0.5)
+
+    async def _set_field(self, selector: str, value: Any) -> bool:
+        js = (
+            "(() => { const el = document.querySelector(%s); if (!el) return false;"
+            " el.focus(); el.value = %s;"
+            " el.dispatchEvent(new Event('input', {bubbles:true}));"
+            " el.dispatchEvent(new Event('change', {bubbles:true}));"
+            " el.dispatchEvent(new Event('blur', {bubbles:true}));"
+            " return true; })()" % (_js_string(selector), _js_string(value))
+        )
+        return bool(await self._eval(js))
+
+    # ── SiteDriver ───────────────────────────────────────────────────────
+
+    async def open_booking_page(self, url: str) -> None:
+        await self.client.command("Page.navigate", {"url": url}, self.tab_id)
+        await self._wait_ready()
+
+    async def wait_for_waf(self) -> None:
+        """The operator's own browser normally passes straight through."""
+        text = await self._eval("document.body ? document.body.innerText : ''")
+        low = (text or "").lower()
+        for marker in WAF_BLOCK_MARKERS:
+            if marker in low:
+                raise WAFBlocked(
+                    f"the portal returned the block shell ({marker}) for this tab"
+                )
+
+    async def locate(self, slot: dict) -> bool:
+        require_configured(self.selectors)
+        if self.selectors.vac_select:
+            await self._set_field(self.selectors.vac_select, slot.get("location"))
+        if self.selectors.category_select:
+            await self._set_field(self.selectors.category_select, slot.get("category"))
+        await self._wait_ready(timeout=15)
+        found = await self._eval(self._row_js(slot, "return true;"))
+        return bool(found)
+
+    async def reserve(self, slot: dict) -> None:
+        require_configured(self.selectors)
+        button = self.selectors.reserve_button or ""
+        rect_js = self._row_js(
+            slot,
+            self._rect_js(f"row.querySelector({_js_string(button)})"),
+        )
+        rect = await self._eval(rect_js)
+        if not rect:
+            raise SlotNotFound(
+                f"{slot.get('date')} {slot.get('time') or ''} is no longer offered"
+            )
+        await self._click_at(rect)
+
+    async def read_tokens(self) -> dict[str, str]:
+        tokens: dict[str, str] = {}
+        for name in self.selectors.token_inputs:
+            value = await self._eval(
+                "(() => { const el = document.querySelector(%s);"
+                " return el ? el.value : null; })()" % _js_string(f"input[name='{name}']")
+            )
+            if value is not None:
+                tokens[name] = value
+        return tokens
+
+    async def fill_applicant(self, data: dict) -> None:
+        if not self.selectors.applicant_fields:
+            raise SiteNotConfigured("applicant_fields are not configured; cannot fill the form")
+        for field_name, selector in self.selectors.applicant_fields.items():
+            value = data.get(field_name)
+            if value is None or value == "":
+                continue
+            if not await self._set_field(selector, value):
+                raise SiteNotConfigured(f"applicant field not found on the page: {field_name}")
+
+    async def submit(self) -> None:
+        if not self.selectors.submit_button:
+            raise SiteNotConfigured("submit_button is not configured")
+        rect = await self._eval(self._rect_js(f"document.querySelector({_js_string(self.selectors.submit_button)})"))
+        if not rect:
+            raise SiteNotConfigured("submit button not found on the page")
+        await self._click_at(rect)
+        await self._wait_ready(timeout=60)
+
+    async def confirmation_ref(self) -> str | None:
+        if not self.selectors.confirmation_marker:
+            raise SiteNotConfigured("confirmation_marker is not configured")
+        return await self._eval(
+            "(() => { const el = document.querySelector(%s);"
+            " return el ? el.innerText.trim() : null; })()"
+            % _js_string(self.selectors.confirmation_marker)
+        )
+
+    async def screenshot(self, path: Path) -> None:
+        data = await self.client.screenshot_b64(self.tab_id)
+        if not data:
+            return
+        import base64
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(base64.b64decode(data))
+
+    async def content(self) -> str:
+        return await self._eval("document.documentElement.outerHTML") or ""

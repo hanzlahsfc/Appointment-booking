@@ -101,21 +101,39 @@ async def describe_login_form(page: Page) -> list[str]:
 
 
 async def wait_for_human_login(page: Page, timeout: int, poll: int = 3) -> str:
-    """Block until the page leaves the login form, i.e. the human signed in."""
+    """Block until the page is definitively past the login form.
+
+    Positive detection only. A transient reCAPTCHA error can blank the password
+    field and briefly change the page, so require the login markers to stay
+    absent for several consecutive checks before declaring success.
+    """
     elapsed = 0
+    stable = 0
     announced = False
     while elapsed < timeout:
         url = page.url or ""
         on_login = "login" in url.lower()
         try:
-            still_has_password = await page.locator("input[type=password]").count() > 0
+            has_password = await page.locator("input[type=password]").count() > 0
         except Exception:
-            still_has_password = False
-        if not on_login or not still_has_password:
-            return url
-        if not announced or elapsed % 30 == 0:
-            print(f"    waiting for you to sign in… ({elapsed}s, url={url[:100]})")
-            announced = True
+            has_password = False
+        try:
+            has_captcha = any(
+                "recaptcha" in (frame.url or "").lower() for frame in page.frames
+            )
+        except Exception:
+            has_captcha = False
+
+        if not on_login and not has_password and not has_captcha:
+            stable += 1
+            if stable >= 3:
+                return url
+        else:
+            stable = 0
+            if not announced or elapsed % 30 == 0:
+                note = "captcha still on the page" if has_captcha else "login form present"
+                print(f"    waiting for sign-in… ({elapsed}s, {note}) — {url[:90]}")
+                announced = True
         await asyncio.sleep(poll)
         elapsed += poll
     raise TimeoutError(f"no sign-in detected after {timeout}s (still at {page.url})")
@@ -154,7 +172,7 @@ async def open_browser(pw, args) -> tuple[BrowserContext, Page]:
     print(f"==> launching Chrome with profile {profile_dir} (headful)")
     ctx = await pw.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
-        headless=False,
+        headless=bool(getattr(args, "headless", False)),
         channel="chrome",
         args=["--disable-blink-features=AutomationControlled"],
         viewport={"width": 1366, "height": 900},
@@ -184,6 +202,72 @@ async def maybe_auto_login(page: Page, creds: dict | None) -> None:
         print(f"    could not auto-fill credentials ({exc}); type them manually")
 
 
+async def _waf_state(page: Page) -> tuple[bool, str]:
+    """True + evidence when the page is an Incapsula block rather than the site."""
+    try:
+        body = (await page.locator("body").inner_text(timeout=2000)).lower()
+    except Exception:
+        body = ""
+    for marker in ("access denied", "error 17", "incapsula incident"):
+        if marker in body:
+            return True, marker
+    for frame in page.frames:
+        if "_incapsula" in (frame.url or "").lower():
+            return True, "incapsula frame"
+    return False, ""
+
+
+async def probe(args) -> int:
+    """Report whether a REAL browser gets the login form, then exit.
+
+    This is the check that distinguishes "blocked egress" from "curl cannot run
+    the JS challenge" — plain curl always fails, a browser may well pass.
+    """
+    print(f"==> probing {LOGIN_URL} (headless={bool(args.headless)})")
+    async with async_playwright() as pw:
+        ctx, page = await open_browser(pw, args)
+        try:
+            try:
+                response = await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45_000)
+                status = response.status if response is not None else None
+            except Exception as exc:
+                print(f"RESULT: navigation failed: {exc}")
+                return 3
+
+            await page.wait_for_timeout(4000)
+            blocked, evidence = await _waf_state(page)
+            title = await page.title()
+            try:
+                body = " ".join((await page.locator("body").inner_text(timeout=2000)).split())[:240]
+            except Exception:
+                body = ""
+            inputs = await page.locator("input").count()
+            fields = await describe_login_form(page)
+
+            print(f"  status     : {status}")
+            print(f"  final url  : {page.url}")
+            print(f"  title      : {title}")
+            print(f"  inputs     : {inputs}")
+            for line in fields:
+                print(f"    {line}")
+            print(f"  body       : {body}")
+
+            if blocked:
+                print(f"RESULT: WAF BLOCKED ({evidence}) — no clearance from this egress.")
+                return 2
+            if inputs == 0:
+                print("RESULT: page loaded but no form fields — needs a manual look.")
+                return 1
+            print("RESULT: OK — a real browser reaches the login form.")
+            print("        Re-run without --probe and sign in to capture the flow.")
+            return 0
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(description="GVCW recon recorder (§2.4)")
     ap.add_argument("--profile", default=None, help="profile name (any partial match)")
@@ -193,10 +277,15 @@ async def main() -> int:
     ap.add_argument("--login-timeout", type=int, default=600, help="seconds to wait for your sign-in (default 600)")
     ap.add_argument("--auto-login", action="store_true", help="pre-fill credentials from data/creds (reCAPTCHA still manual)")
     ap.add_argument("--all", action="store_true", help="record every resource type, not just document/xhr/fetch")
+    ap.add_argument("--probe", action="store_true", help="reachability + login-form check only (no sign-in), then exit")
+    ap.add_argument("--headless", action="store_true", help="run the probe browser headless (headful has better WAF odds)")
     args = ap.parse_args()
 
     cfg = load_config()
     profile = find_profile(cfg, args.profile)
+
+    if args.probe:
+        return await probe(args)
 
     creds = None
     if args.auto_login:
@@ -263,7 +352,9 @@ async def main() -> int:
                       f"(VAC → visa type → date; book manually if a slot is open)")
                 deadline = time.time() + args.watch
                 while time.time() < deadline:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(10)
+                    # flush as we go: an interrupted run should still leave a capture
+                    recorder.write_har()
             else:
                 print("==> click through the picker now. Recording until Ctrl+C.")
                 print("    If a slot opens, book it manually — that captures the reserve call.")

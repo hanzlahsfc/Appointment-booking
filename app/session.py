@@ -50,8 +50,9 @@ async def login(page: Page, creds: dict, expected_redirect: str = None) -> None:
     await inc.wait_for_clear(page, expect_text="login")
 
     try:
-        await page.fill("input[name='username'], input#edit-name, input#email", creds["username"])
-        await page.fill("input[name='password'], input#edit-pass", creds["password"])
+        # real field ids confirmed by recon --probe (Drupal login form)
+        await page.fill("#username, input[name='username']", creds["username"])
+        await page.fill("#password, input[name='password']", creds["password"])
     except Exception as e:
         raise LoginError(f"could not locate credential fields: {e}") from e
 

@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Appointment Booker Bridge</title>
+    <style>
+      :root { color-scheme: dark light; }
+      body {
+        font: 13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+        margin: 0; padding: 14px 16px; width: 300px; background: #0f172a; color: #e2e8f0;
+      }
+      h1 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+             background: #ef4444; margin-right: 6px; vertical-align: middle; }
+      .dot.on { background: #22c55e; }
+      label { display: block; margin: 10px 0 4px; color: #94a3b8; font-size: 12px; }
+      select, input, button {
+        width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: 6px;
+        border: 1px solid #334155; background: #1e293b; color: #e2e8f0; font-size: 13px;
+      }
+      button { cursor: pointer; margin-top: 8px; border-color: #2563eb; background: #2563eb; }
+      button.secondary { background: #1e293b; border-color: #334155; }
+      p.hint { color: #94a3b8; font-size: 11px; margin: 10px 0 0; }
+      #error { color: #fca5a5; font-size: 11px; margin-top: 8px; word-break: break-word; }
+    </style>
+  </head>
+  <body>
+    <h1><span id="dot" class="dot"></span>Appointment Booker Bridge</h1>
+
+    <label for="port">Agent port (crawler dashboard port)</label>
+    <input id="port" type="number" min="1" max="65535" value="8080" />
+
+    <label for="tab">Tab the agent may drive</label>
+    <select id="tab"><option value="">Loading tabs…</option></select>
+
+    <button id="connect">Connect</button>
+    <button id="disconnect" class="secondary">Disconnect</button>
+
+    <p class="hint">
+      Pick the tab that is already signed in to the portal. The agent will show a
+      "debugging this browser" banner while it is attached.
+    </p>
+    <div id="error"></div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
