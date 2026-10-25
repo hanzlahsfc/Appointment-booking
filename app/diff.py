@@ -54,3 +54,43 @@ def dedupe_alerted(current: Iterable[dict], alerted_keys: set[tuple]) -> list[di
 
 def sort_by_date(slots: Iterable[dict]) -> list[dict]:
     return sorted(slots, key=lambda s: (s["date"], s["time"] or ""))
+
+
+def select_bookable(new_slots: Iterable[dict], prefer: dict | None = None) -> dict | None:
+    """Pick the single slot worth claiming this poll.
+
+    Pure and deterministic so it can be unit-tested without a browser. Order:
+    drop anything outside the date window, prefer the configured times, then
+    take the earliest date/time. Slots with no time sort last so a timed slot is
+    always preferred over "any time".
+    """
+    prefer = prefer or {}
+    earliest = prefer.get("earliest_date")
+    latest = prefer.get("latest_date")
+    times = list(prefer.get("times") or [])
+
+    candidates = []
+    for slot in new_slots:
+        date = slot.get("date") or ""
+        if earliest and date < str(earliest):
+            continue
+        if latest and date > str(latest):
+            continue
+        candidates.append(slot)
+
+    if not candidates:
+        return None
+
+    def rank(slot: dict) -> tuple:
+        slot_time = slot.get("time") or ""
+        timed_first = 0 if slot_time else 1
+        time_rank = times.index(slot_time) if slot_time in times else len(times)
+        return (timed_first, slot.get("date") or "", time_rank, slot_time)
+
+    # Prefer configured times when any candidate matches one of them.
+    if times:
+        matching = [s for s in candidates if (s.get("time") or "") in times]
+        if matching:
+            candidates = matching
+
+    return sorted(candidates, key=rank)[0]

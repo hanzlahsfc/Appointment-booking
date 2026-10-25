@@ -32,6 +32,30 @@ CREATE TABLE IF NOT EXISTS alert_log (
     subject    TEXT,
     status     TEXT NOT NULL
 );
+
+-- One row per booking attempt. finished_at IS NULL means "in flight"; the
+-- partial index below makes a concurrent double-claim impossible in SQLite
+-- rather than relying on application-level checks.
+CREATE TABLE IF NOT EXISTS booking_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile          TEXT NOT NULL,
+    location         TEXT NOT NULL,
+    category         TEXT NOT NULL,
+    date             TEXT NOT NULL,
+    time             TEXT,
+    attempt          INTEGER NOT NULL DEFAULT 1,
+    mode             TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    stage            TEXT,
+    confirmation_ref TEXT,
+    evidence_path    TEXT,
+    error            TEXT,
+    started_at       TEXT NOT NULL,
+    finished_at      TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS booking_open_uniq
+    ON booking_log(profile) WHERE finished_at IS NULL;
 """
 
 
@@ -131,6 +155,114 @@ class Store:
                 (since_iso,),
             ).fetchall()
         ]
+
+    # ── booking ──────────────────────────────────────────────────────────
+
+    TERMINAL_STATUSES = ("booked", "failed", "slot_gone", "needs_human", "aborted_unknown_state")
+
+    def reserve_booking_attempt(
+        self, slot: dict, mode: str, started_at: str, status: str = "attempted"
+    ) -> int | None:
+        """Claim the right to book this profile's next slot.
+
+        Returns the new row id, or None when another attempt is already in
+        flight (enforced by booking_open_uniq, so it is race-safe).
+        """
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO booking_log (profile, location, category, date, time, mode,"
+                    " status, stage, started_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        slot["profile"],
+                        slot["location"],
+                        slot["category"],
+                        slot["date"],
+                        slot.get("time"),
+                        mode,
+                        status,
+                        "claim",
+                        started_at,
+                    ),
+                )
+                self._conn.commit()
+                return int(cur.lastrowid)
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                return None
+
+    def finish_booking(
+        self,
+        booking_id: int,
+        status: str,
+        stage: str | None = None,
+        confirmation_ref: str | None = None,
+        evidence_path: str | None = None,
+        error: str | None = None,
+        finished_at: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE booking_log SET status=?, stage=?, confirmation_ref=?,"
+                " evidence_path=?, error=?, finished_at=? WHERE id=?",
+                (status, stage, confirmation_ref, evidence_path, error, finished_at, booking_id),
+            )
+            self._conn.commit()
+
+    def open_booking(self, profile: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM booking_log WHERE profile=? AND finished_at IS NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (profile,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def has_booked(self, profile: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM booking_log WHERE profile=? AND status='booked' LIMIT 1", (profile,)
+        ).fetchone()
+        return row is not None
+
+    CLAIMED_STATUSES = ("attempted", "needs_human", "booked", "aborted_unknown_state")
+
+    def booking_claimed_for_slot(self, slot: dict) -> bool:
+        """True when this exact slot already produced a claim.
+
+        Prevents re-claiming the same appointment after a hand-off or a failure
+        that may have left it held — the one mistake that could double-book a
+        client.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM booking_log WHERE profile=? AND date=?"
+            " AND IFNULL(time,'')=IFNULL(?,'')"
+            " AND status IN ('attempted','needs_human','booked','aborted_unknown_state') LIMIT 1",
+            (slot["profile"], slot["date"], slot.get("time")),
+        ).fetchone()
+        return row is not None
+
+    def booking_attempts_since(self, since_iso: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM booking_log WHERE started_at >= ?", (since_iso,)
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def recent_bookings(self, limit: int = 50) -> list[dict]:
+        return [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT * FROM booking_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        ]
+
+    def mark_booked(self, slot: dict) -> None:
+        """Flag the slot row as successfully booked."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE slot_state SET alerted=1 WHERE profile=? AND location=? AND category=?"
+                " AND date=? AND time=?",
+                (slot["profile"], slot["location"], slot["category"], slot["date"], slot.get("time")),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

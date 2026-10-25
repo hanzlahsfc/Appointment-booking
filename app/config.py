@@ -22,6 +22,29 @@ class AppConfig:
     headless: bool = True
 
 
+VALID_BOOKING_MODES = ("off", "assist", "auto")
+
+
+@dataclass
+class BookingConfig:
+    """Auto-booking settings. Every default is off/dry on purpose: a mistaken
+    automatic booking costs a real appointment slot."""
+
+    mode: str = "off"  # off | assist | auto
+    dry_run: bool = True  # log the whole flow, never click reserve
+    alarm_seconds: int = 120
+    headless: bool = False  # assist needs a visible window to take over
+    max_attempts_per_profile_per_hour: int = 4
+    reserve_timeout_seconds: int = 120
+    evidence_dir: Path = field(default_factory=lambda: ROOT / "data" / "evidence")
+    profile_dir: Path = field(default_factory=lambda: ROOT / "data" / "chrome-profile")
+    selectors_file: Path = field(default_factory=lambda: ROOT / "recon" / "booking-selectors.json")
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode in ("assist", "auto")
+
+
 @dataclass
 class ProfileConfig:
     name: str
@@ -31,6 +54,9 @@ class ProfileConfig:
     booking_url: str
     username_env: str = "USERNAME"
     password_env: str = "PASSWORD"
+    auto_book: bool = False
+    applicant_file: str | None = None
+    prefer: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -45,6 +71,7 @@ class Config:
     app: AppConfig
     profiles: list[ProfileConfig]
     notifications: NotificationsConfig
+    booking: BookingConfig = field(default_factory=BookingConfig)
     proxy: str | None = None  # e.g. socks5://user:pass@host:1080 or http://host:3128
     root: Path = ROOT
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
@@ -58,6 +85,26 @@ class Config:
     def db_path(self) -> Path:
         return self.data_dir / "slot_state.db"
 
+    @property
+    def headless(self) -> bool:
+        """Assist/auto need a visible window so a human can finish the form."""
+        if self.booking.enabled:
+            return self.booking.headless
+        return self.app.headless
+
+    def profile_by_name(self, name: str) -> ProfileConfig | None:
+        for p in self.profiles:
+            if p.name == name:
+                return p
+        return None
+
+    def booking_enabled_for(self, profile_name: str) -> bool:
+        """Master mode on AND this profile explicitly opted in."""
+        if not self.booking.enabled:
+            return False
+        profile = self.profile_by_name(profile_name)
+        return bool(profile and profile.auto_book)
+
 
 def _parse_bool(value: Any, default: bool) -> bool:
     if value is None:
@@ -65,6 +112,28 @@ def _parse_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _parse_booking(raw: dict[str, Any], root: Path) -> BookingConfig:
+    book_raw = raw.get("booking", {}) or {}
+    mode = str(book_raw.get("mode", "off")).strip().lower()
+    if mode not in VALID_BOOKING_MODES:
+        raise ValueError(f"booking.mode must be one of {VALID_BOOKING_MODES}, got {mode!r}")
+    return BookingConfig(
+        mode=mode,
+        dry_run=_parse_bool(book_raw.get("dry_run", True), True),
+        alarm_seconds=int(book_raw.get("alarm_seconds", 120)),
+        headless=_parse_bool(book_raw.get("headless", False), False),
+        max_attempts_per_profile_per_hour=int(
+            book_raw.get("max_attempts_per_profile_per_hour", 4)
+        ),
+        reserve_timeout_seconds=int(book_raw.get("reserve_timeout_seconds", 120)),
+        evidence_dir=Path(book_raw.get("evidence_dir", root / "data" / "evidence")),
+        profile_dir=Path(book_raw.get("profile_dir", root / "data" / "chrome-profile")),
+        selectors_file=Path(
+            book_raw.get("selectors_file", root / "recon" / "booking-selectors.json")
+        ),
+    )
 
 
 def load_config(path: str | Path | None = None) -> Config:
@@ -101,6 +170,9 @@ def load_config(path: str | Path | None = None) -> Config:
             ),
             username_env=str(p.get("username_env", default_username_env)),
             password_env=str(p.get("password_env", default_password_env)),
+            auto_book=_parse_bool(p.get("auto_book", False), False),
+            applicant_file=(str(p["applicant_file"]) if p.get("applicant_file") else None),
+            prefer=dict(p.get("prefer", {}) or {}),
         )
         for i, p in enumerate(raw.get("profiles", []) or [])
     ]
@@ -117,6 +189,7 @@ def load_config(path: str | Path | None = None) -> Config:
         app=app,
         profiles=profiles,
         notifications=notifications,
+        booking=_parse_booking(app_raw, ROOT),
         proxy=(raw.get("network", {}) or {}).get("proxy"),
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)

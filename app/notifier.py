@@ -25,7 +25,13 @@ class Notifier:
         date = slot.get("date", "unknown")
         return f"🟢 NEW SLOT: {cat} @ {loc} — {date}"
 
-    def build_body(self, slot: dict) -> str:
+    def build_body(self, slot: dict, auto_book: bool = False) -> str:
+        disclaimer = (
+            "Automatic booking is enabled for this profile: the crawler will claim the slot "
+            "and alarm you to finish the form."
+            if auto_book
+            else "No automatic booking has been performed."
+        )
         stanza = f"""<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#111">
 <h2>🟢 New appointment slot detected</h2>
 <table style="border-collapse:collapse">
@@ -38,13 +44,13 @@ class Notifier:
 <br/>
 <p><a href="{slot.get('booking_url', '')}" style="background:#1570ef;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none;display:inline-block">Open booking page</a></p>
 <p style="color:#666;font-size:12px">Slot may already be taken — it is first-come, first-served.
-This alert is for <b>{slot['profile']}</b>. No automatic booking has been performed.</p>
+This alert is for <b>{slot['profile']}</b>. {disclaimer}</p>
 </body></html>"""
         return stanza
 
-    async def send(self, slot: dict) -> bool:
+    async def send(self, slot: dict, auto_book: bool = False) -> bool:
         subject = self.build_subject(slot)
-        body = self.build_body(slot)
+        body = self.build_body(slot, auto_book=auto_book)
         recipients = slot.get("email") or self.to
         if not recipients:
             logger.warning("no recipient for slot alert; skipping")
@@ -74,6 +80,87 @@ This alert is for <b>{slot['profile']}</b>. No automatic booking has been perfor
                 if attempt < 3:
                     await asyncio.sleep(3 * attempt)
         return False
+
+    # ── booking result emails ────────────────────────────────────────────
+
+    BOOKING_HEADLINES = {
+        "needs_human": "🔔 SLOT CLAIMED — finish the form now",
+        "booked": "✅ BOOKED",
+        "slot_gone": "⚪ Slot was taken by someone else",
+        "failed": "⚠️ Booking failed",
+        "aborted_unknown_state": "⚠️ Booking needs checking by hand",
+        "dry_run": "🧪 Dry run — reserve was not clicked",
+        "rate_limited": "⏸ Rate limited",
+        "skipped_duplicate": "⏭ Skipped (duplicate)",
+    }
+
+    def build_booking_subject(self, result: dict) -> str:
+        slot = result.get("slot") or {}
+        status = str(result.get("status"))
+        headline = self.BOOKING_HEADLINES.get(status, f"Booking: {status}")
+        return f"{headline} — {slot.get('category')} @ {slot.get('location')} {slot.get('date')}"
+
+    def build_booking_body(self, result: dict) -> str:
+        slot = result.get("slot") or {}
+        status = str(result.get("status"))
+        rows = [
+            ("Profile", result.get("profile")),
+            ("Status", status),
+            ("Stage", result.get("stage")),
+            ("Category", slot.get("category")),
+            ("VAC location", slot.get("location")),
+            ("Date", slot.get("date")),
+            ("Time", slot.get("time") or "Any / not specified"),
+            ("Confirmation", result.get("confirmation_ref") or "—"),
+            ("Evidence", result.get("evidence_path") or "—"),
+        ]
+        if result.get("error"):
+            rows.append(("Detail", result.get("error")))
+        table = "".join(
+            f'<tr><td style="padding:3px 12px 3px 0"><b>{k}</b></td><td>{v}</td></tr>'
+            for k, v in rows
+        )
+        if status == "needs_human":
+            action = (
+                '<p style="font-weight:700;color:#b42318">The slot is claimed. Go to the machine '
+                "running the crawler and finish the applicant form in the open browser window "
+                "before the hold expires.</p>"
+            )
+        elif status == "booked":
+            action = '<p style="color:#027a48">Nothing further to do.</p>'
+        elif status == "aborted_unknown_state":
+            action = (
+                '<p style="font-weight:700;color:#b42318">The slot may or may not be held. Check '
+                "the portal by hand before trying again — do not re-book blindly.</p>"
+            )
+        else:
+            action = ""
+        return (
+            '<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#111">'
+            f"<h2>{self.BOOKING_HEADLINES.get(status, 'Booking update')}</h2>"
+            f'<table style="border-collapse:collapse">{table}</table>{action}</body></html>'
+        )
+
+    def notify_booking(self, result: dict) -> None:
+        """Queue a booking-result email without blocking the caller."""
+        slot = result.get("slot") or {}
+        recipients = slot.get("email") or self.to
+        if not recipients:
+            logger.warning("no recipient for booking email (%s)", result.get("status"))
+            return
+        if self.dry_run:
+            logger.info("[dry-run] would email booking result: %s", result.get("status"))
+            return
+        coro = self._send_booking(result, recipients)
+        try:
+            asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            logger.warning("no running loop; booking email not sent")
+
+    async def _send_booking(self, result: dict, recipients: list[str]) -> bool:
+        return await self._post(
+            self.build_booking_subject(result), self.build_booking_body(result), recipients
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()

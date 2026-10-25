@@ -1,41 +1,59 @@
-"""Recon helper (§2.4 / §11).
+"""Recon recorder (§2.4 / §11).
 
-Logs into the real GVCW portal headful (once, WAF-cleared), opens the profile's
-booking page, and records everything the slot-picker does:
+Opens the real GVCW portal in a browser YOU are signed into, then records
+everything that flows through it — every request (including POST bodies),
+every response — and distils it into artifacts that pin down the slot picker
+and the reserve call.
 
-  - every JSON/XHR response it makes  -> recon/json/<ts>__<hash>.json
-  - the post-login redirect + page URLs
-  - the rendered DOM (screenshot + HTML)
-  - a readable findings summary in recon/findings.txt
+Two ways to get an authenticated session:
 
-Run it, then CLICK THROUGH the slot picker for ~a minute (pick a VAC, a visa
-type, a date) so the picker's API calls get captured:
+  1. Default — a dedicated persistent profile. The browser opens on the login
+     page; YOU sign in and solve the reCAPTCHA once. That profile is reused on
+     later runs, so the session stays warm.
+         python recon.py --profile "Ahmed - Work Permit"
 
-    .venv/bin/python recon.py --profile "Ahmed - Work Permit" --watch 120
+  2. Attach to a Chrome you started yourself with a debug port. Note Chrome 136+
+     ignores --remote-debugging-port on the DEFAULT profile, so it must be a
+     dedicated profile:
+         chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\\chrome-recon
+         python recon.py --cdp http://127.0.0.1:9222
 
-Findings go to ./recon/ — share that folder back.
+Then click through the picker (VAC → visa type → date). If a slot is actually
+available, booking it manually here is the ONLY way to capture the reserve POST,
+which is why --continuous exists: leave it running and the next real booking is
+captured whenever it happens.
+
+Outputs (all under ./recon/):
+    har/<ts>.har            full request/response capture
+    booking-flow.json       redacted endpoint map + request field names
+    findings.txt            login form, post-login URL, page URLs, notes
+    post-login.png, booking-page.html, booking-page.png
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
-import json
 import time
 from datetime import datetime
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from playwright.async_api import BrowserContext, Page, async_playwright
 
 from app.browser import IncapsulaHandler, WAFBlocked
 from app.config import load_config
+from app.recorder import RecorderConfig, TrafficRecorder
 from app.session import LOGIN_URL, load_credentials
 
 OUT = Path(__file__).resolve().parent / "recon"
+DEFAULT_PROFILE_DIR = Path(__file__).resolve().parent / "data" / "chrome-profile"
 
 
 def ts() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def slug(name: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
 
 
 def find_profile(cfg, name: str | None):
@@ -49,12 +67,62 @@ def find_profile(cfg, name: str | None):
     return cfg.profiles[0]
 
 
-def slug(name: str) -> str:
-    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
+async def describe_login_form(page: Page) -> list[str]:
+    """Record what the login form actually looks like (selectors for later)."""
+    found: list[str] = []
+    try:
+        inputs = await page.locator("input").count()
+    except Exception:
+        inputs = 0
+    for i in range(inputs):
+        try:
+            el = page.locator("input").nth(i)
+            found.append(
+                "input[{i}] type={t} name={n} id={i2} placeholder={p}".format(
+                    i=i,
+                    t=await el.get_attribute("type"),
+                    n=await el.get_attribute("name"),
+                    i2=await el.get_attribute("id"),
+                    p=await el.get_attribute("placeholder"),
+                )
+            )
+        except Exception:
+            continue
+    for selector in ("button[type=submit]", "input[type=submit]", ".form-submit", "button:has-text('Sign in')"):
+        try:
+            if await page.locator(selector).count():
+                found.append(f"submit candidate: {selector}")
+        except Exception:
+            continue
+    for frame in page.frames:
+        if "recaptcha" in (frame.url or "").lower():
+            found.append(f"recaptcha frame present: {frame.url[:120]}")
+    return found
 
 
-async def wait_for_login_form(page, timeout: int = 90) -> None:
-    """Wait until either a login form renders or the WAF hard-blocks."""
+async def wait_for_human_login(page: Page, timeout: int, poll: int = 3) -> str:
+    """Block until the page leaves the login form, i.e. the human signed in."""
+    elapsed = 0
+    announced = False
+    while elapsed < timeout:
+        url = page.url or ""
+        on_login = "login" in url.lower()
+        try:
+            still_has_password = await page.locator("input[type=password]").count() > 0
+        except Exception:
+            still_has_password = False
+        if not on_login or not still_has_password:
+            return url
+        if not announced or elapsed % 30 == 0:
+            print(f"    waiting for you to sign in… ({elapsed}s, url={url[:100]})")
+            announced = True
+        await asyncio.sleep(poll)
+        elapsed += poll
+    raise TimeoutError(f"no sign-in detected after {timeout}s (still at {page.url})")
+
+
+async def wait_for_login_form(page: Page, timeout: int = 90) -> None:
+    """Wait until a login form renders, or the WAF blocks us."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
@@ -63,7 +131,6 @@ async def wait_for_login_form(page, timeout: int = 90) -> None:
         except Exception:
             n, body = 0, ""
         if n > 0:
-            # distinguish login page vs WAF iframe by scanning frames
             return
         if "access denied" in body.lower():
             raise WAFBlocked("login page was replaced by an Incapsula block")
@@ -71,142 +138,174 @@ async def wait_for_login_form(page, timeout: int = 90) -> None:
     raise TimeoutError("no login form and no block shell appeared")
 
 
+async def open_browser(pw, args) -> tuple[BrowserContext, Page]:
+    """Attach to a debug-port Chrome, or launch the dedicated warm profile."""
+    if args.cdp:
+        print(f"==> attaching to existing Chrome at {args.cdp}")
+        browser = await pw.chromium.connect_over_cdp(args.cdp)
+        if not browser.contexts:
+            raise SystemExit("attached, but the browser has no context/page open")
+        ctx = browser.contexts[0]
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        return ctx, page
+
+    profile_dir = Path(args.profile_dir).expanduser()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    print(f"==> launching Chrome with profile {profile_dir} (headful)")
+    ctx = await pw.chromium.launch_persistent_context(
+        user_data_dir=str(profile_dir),
+        headless=False,
+        channel="chrome",
+        args=["--disable-blink-features=AutomationControlled"],
+        viewport={"width": 1366, "height": 900},
+        locale="en-GB",
+        timezone_id="Asia/Karachi",
+    )
+    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+    return ctx, page
+
+
+async def maybe_auto_login(page: Page, creds: dict | None) -> None:
+    """Optional: fill the credential fields from the creds file.
+
+    reCAPTCHA still has to be solved by hand, so this only shortens the typing.
+    """
+    if not creds:
+        return
+    try:
+        await page.locator("#edit-name, input[name='username'], input[type=email]").first.fill(
+            creds["username"], timeout=8000
+        )
+        await page.locator("#edit-pass, input[name='password'], input[type=password]").first.fill(
+            creds["password"], timeout=8000
+        )
+        print("    credentials filled — solve the reCAPTCHA and press Sign in")
+    except Exception as exc:
+        print(f"    could not auto-fill credentials ({exc}); type them manually")
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(description="GVCW recon recorder (§2.4)")
     ap.add_argument("--profile", default=None, help="profile name (any partial match)")
-    ap.add_argument("--watch", type=int, default=120, help="seconds to let you click through the picker (default 120)")
+    ap.add_argument("--cdp", default=None, help="attach to Chrome at this CDP URL, e.g. http://127.0.0.1:9222")
+    ap.add_argument("--profile-dir", default=str(DEFAULT_PROFILE_DIR), help="persistent Chrome profile dir")
+    ap.add_argument("--watch", type=int, default=0, help="seconds to record before exiting (0 = until Ctrl+C)")
+    ap.add_argument("--login-timeout", type=int, default=600, help="seconds to wait for your sign-in (default 600)")
+    ap.add_argument("--auto-login", action="store_true", help="pre-fill credentials from data/creds (reCAPTCHA still manual)")
+    ap.add_argument("--all", action="store_true", help="record every resource type, not just document/xhr/fetch")
     args = ap.parse_args()
 
     cfg = load_config()
     profile = find_profile(cfg, args.profile)
-    creds = load_credentials(cfg.creds_dir / f"{slug(profile.name)}.json")
 
-    (OUT / "json").mkdir(parents=True, exist_ok=True)
+    creds = None
+    if args.auto_login:
+        creds = load_credentials(cfg.creds_dir / f"{slug(profile.name)}.json")
+
+    OUT.mkdir(parents=True, exist_ok=True)
     findings: list[str] = []
-    json_hits: list[tuple[str, str, int, str]] = []
 
     print(f"==> recon profile: {profile.name} ({profile.category} @ {profile.location})")
     print(f"==> login URL:     {LOGIN_URL}")
     print(f"==> booking URL:   {profile.booking_url}")
-    print("==> launching headful browser — leave the window open while recording\n")
 
-    captured: list[dict] = []
+    recorder = TrafficRecorder(
+        RecorderConfig(out_dir=OUT, capture_all=args.all)
+    )
 
-    async def on_response(resp):
-        url = resp.url
-        ct = resp.headers.get("content-type", "")
-        is_json = "json" in ct
-        hit = is_json or any(k in url.lower() for k in ("api", "ajax", "slot", "appointment", "date"))
-        if resp.request.resource_type in ("xhr", "fetch") and (is_json or hit):
-            try:
-                body = await resp.body()
-            except Exception:
-                return
-            if body and body.strip():
-                fname = f"{ts()}__{hashlib.md5(url.encode()).hexdigest()[:8]}.json"
-                (OUT / "json" / fname).write_bytes(body)
-                json_hits.append((f"{resp.status}", url, len(body), fname))
-                captured.append({"status": resp.status, "url": url, "file": fname})
-                tag = "JSON" if is_json else "REQ"
-                print(f"   [{tag}] {resp.status} {url[:120]} ({len(body)}B) -> {fname}")
-                if len(captured) > 200:
-                    captured.pop(0)
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, channel="chrome", args=["--disable-blink-features=AutomationControlled"])
-        ctx = await browser.new_context(viewport={"width": 1366, "height": 900}, locale="en-GB", timezone_id="Asia/Karachi")
-        page = await ctx.new_page()
-
-        # ---- 1. login ----
-        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
-        await wait_for_login_form(page)
+    async with async_playwright() as pw:
+        ctx, page = await open_browser(pw, args)
         inc = IncapsulaHandler()
+
         try:
-            await inc.wait_for_clear(page)
-        except WAFBlocked:
-            findings.append("WAF hard-block (Error 17/Access denied) during login — IP rejected pre-login.")
-            print("BLOCKED during login — no further capture possible from this IP.")
-            await browser.close()
-            _write_findings(findings)
-            return 2
-
-        await page.wait_for_timeout(1500)
-        inputs = await page.locator("input").count()
-        login_desc = []
-        for i in range(inputs):
-            t = await page.locator("input").nth(i).get_attribute("type")
-            nm = await page.locator("input").nth(i).get_attribute("name") or ""
-            login_desc.append(f"input[{i}] type={t} name={nm}")
-        findings.append("LOGIN FORM: " + "; ".join(login_desc) + f" (page title: {await page.title()})")
-        print("login form fields:", login_desc)
-
-        # fill + submit
-        filled = False
-        for i in range(inputs):
-            t = (await page.locator("input").nth(i).get_attribute("type") or "")
-            nm = (await page.locator("input").nth(i).get_attribute("name") or "").lower()
-            if t in ("text", "email", "tel") or "user" in nm or "mail" in nm or nm in ("edit-name",):
-                await page.locator("input").nth(i).fill(creds["username"])
-                filled = True
-            elif t == "password" or "pass" in nm:
-                await page.locator("input").nth(i).fill(creds["password"])
-        if not filled:
-            # try known selectors
+            # ---- 1. login page ----
+            if "login" not in (page.url or "").lower():
+                await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+            await wait_for_login_form(page)
             try:
-                await page.locator("#edit-name, input[name='username'], #email").first.fill(creds["username"])
-                await page.locator("#edit-pass, input[name='password']").fill(creds["password"])
+                await inc.wait_for_clear(page)
+            except WAFBlocked as exc:
+                findings.append(f"WAF block during login: {exc}")
+                print(f"BLOCKED during login ({exc}).")
+                print("No capture possible — see docs/OPERATIONS.md §6 (egress check).")
+                _write_findings(findings)
+                return 2
+
+            login_fields = await describe_login_form(page)
+            findings.append("LOGIN FORM: " + "; ".join(login_fields))
+            print("login form fields:")
+            for line in login_fields:
+                print("   " + line)
+
+            await maybe_auto_login(page, creds)
+
+            print("\n==> CALL TO ACTION: sign in in the browser window now")
+            print("    (solve the reCAPTCHA; the session is saved to the profile dir)\n")
+            post_login = await wait_for_human_login(page, args.login_timeout)
+            findings.append(f"POST-LOGIN URL: {post_login}")
+            print(f"post-login URL: {post_login}")
+            try:
+                (OUT / "post-login.png").write_bytes(await page.screenshot(full_page=False))
             except Exception:
-                print("WARNING: could not locate username field — fill it manually.")
-                await asyncio.sleep(15)
+                pass
 
-        await page.locator("button[type=submit], input[type=submit], .form-submit").first.click(timeout=10000)
-        await page.wait_for_timeout(6000)
-        post_login = page.url
-        findings.append(f"POST-LOGIN URL: {post_login}")
-        print(f"post-login URL: {post_login}")
-        (OUT / "post-login.png").write_bytes(await page.screenshot(full_page=False))
+            # ---- 2. start recording before touching the picker ----
+            recorder.attach(ctx)
+            print("==> recording started (requests + responses + bodies)")
 
-        # ---- 2. booking page + recording ----
-        page.remove_listener("response", on_response)
-        page.on("response", on_response)
-        await page.goto(profile.booking_url, wait_until="domcontentloaded", timeout=45000)
-        await page.wait_for_timeout(6000)
-        try:
-            await inc.wait_for_clear(page)
-        except WAFBlocked:
-            pass
-        await page.wait_for_timeout(2000)
-        findings.append(f"BOOKING PAGE URL: {page.url}")
-        print(f"booking page URL: {page.url}")
-        print(f"==> now click around the slot picker for up to {args.watch}s (VAC / visatype / a date)...")
+            await page.goto(profile.booking_url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(4000)
+            findings.append(f"BOOKING PAGE URL: {page.url}")
+            print(f"booking page URL: {page.url}")
 
-        deadline = time.time() + args.watch
-        while time.time() < deadline:
-            await asyncio.sleep(5)
+            if args.watch:
+                print(f"==> click through the picker for up to {args.watch}s "
+                      f"(VAC → visa type → date; book manually if a slot is open)")
+                deadline = time.time() + args.watch
+                while time.time() < deadline:
+                    await asyncio.sleep(5)
+            else:
+                print("==> click through the picker now. Recording until Ctrl+C.")
+                print("    If a slot opens, book it manually — that captures the reserve call.")
+                try:
+                    while True:
+                        await asyncio.sleep(10)
+                        recorder.write_har()  # periodic flush so nothing is lost
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    print("\n==> stopping recording")
 
-        # ---- 3. dump DOM ----
-        (OUT / "booking-page.html").write_text(await page.content())
-        (OUT / "booking-page.png").write_bytes(await page.screenshot(full_page=True))
-        findings.append(f"booking DOM dumped: {len(await page.content())} bytes")
-        print("captured final DOM + screenshot.")
+            # ---- 3. dump DOM + close out ----
+            try:
+                html = await page.content()
+                (OUT / "booking-page.html").write_text(html)
+                (OUT / "booking-page.png").write_bytes(await page.screenshot(full_page=True))
+                findings.append(f"booking DOM dumped: {len(html)} bytes")
+                print("captured final DOM + screenshot")
+            except Exception as exc:
+                findings.append(f"DOM dump failed: {exc}")
 
-        await ctx.close()
-        await browser.close()
+            await recorder.aclose()
+            har_path = recorder.write_har()
+            flow_path = recorder.write_flow()
+            findings.append(f"recorded entries: {len(recorder.entries)} (errors: {recorder.errors})")
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
 
-    _write_findings(findings, json_hits)
+    _write_findings(findings)
     print("\n===== DONE =====")
-    print(f"findings summary -> {OUT / 'findings.txt'}")
-    print(f"raw JSON/API captures -> {OUT / 'json'}/")
-    print(f"post-login URL, DOM, screenshots -> {OUT}/")
+    print(f"findings      -> {OUT / 'findings.txt'}")
+    print(f"HAR           -> {OUT / 'har'}")
+    print(f"endpoint map  -> {OUT / 'booking-flow.json'}")
+    print("Share recon/findings.txt + booking-flow.json (both are redacted).")
     return 0
 
 
-def _write_findings(findings: list[str], hits: list[tuple] | None = None) -> None:
+def _write_findings(findings: list[str]) -> None:
     lines = [f"# GVCW recon ({ts()})", ""] + findings + [""]
-    if hits:
-        lines += ["## Captured JSON/API endpoints", ""]
-        lines += [f"{s}  {len(b)}B  {u}   -> {f}" for s, u, b, f in hits]
-        lines += [""]
+    OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "findings.txt").write_text("\n".join(lines))
 
 

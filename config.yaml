@@ -6,6 +6,15 @@ app:
   dry_run: false                 # true = check + log, NO emails
   headless: true                 # set false during recon pass
 
+  # Auto-booking. Left OFF deliberately: `assist` makes the crawler claim the
+  # slot and alarm you to finish the form; `auto` also submits unattended.
+  booking:
+    mode: "off"                  # off | assist | auto
+    dry_run: true                # true = walk the flow, never click reserve
+    alarm_seconds: 120           # how long the local alarm keeps repeating
+    headless: false              # assist needs a visible browser window
+    max_attempts_per_profile_per_hour: 4
+
 # Optional: route browser traffic through a (recommended: residential) proxy
 # to escape IP-reputation blocks from Imperva/Incapsula.
 # network:

@@ -4,3 +4,7 @@ python-dotenv>=1.0.1
 PyYAML>=6.0.1
 fastapi>=0.111.0
 uvicorn>=0.30.0
+# Windows ships no IANA tz database, so zoneinfo (app/util.py -> ZoneInfo) fails
+# to import without this. Harmless on Linux/macOS.
+tzdata>=2024.1
+pytest>=8.0

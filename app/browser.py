@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
@@ -109,3 +111,57 @@ async def get_page(context: BrowserContext) -> Page:
     if context.pages:
         return context.pages[0]
     return await context.new_page()
+
+
+@dataclass
+class BrowserSession:
+    """A browser we own end to end, plus the Playwright instance behind it."""
+
+    context: BrowserContext
+    playwright: Any
+
+    async def aclose(self) -> None:
+        try:
+            await self.context.close()
+        finally:
+            try:
+                await self.playwright.stop()
+            except Exception:
+                pass
+
+
+async def launch_persistent(
+    profile_dir: str | Path,
+    headless: bool = True,
+    proxy: str | None = None,
+    locale: str = "en-GB",
+) -> BrowserSession:
+    """Launch Chrome on a persistent profile directory.
+
+    This is what keeps the session warm. `storage_state` only carries cookies and
+    localStorage; a real profile also keeps IndexedDB, service workers and the
+    cache, so the WAF and the site's own session behave as they do for a human.
+    The human signs in once (reCAPTCHA included) and later runs reuse it.
+    """
+    path = Path(profile_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    playwright = await async_playwright().start()
+
+    kwargs: dict[str, Any] = {
+        "user_data_dir": str(path),
+        "headless": headless,
+        "args": ["--disable-blink-features=AutomationControlled"],
+        "locale": locale,
+        "viewport": {"width": 1366, "height": 900},
+        "timezone_id": "Asia/Karachi",
+    }
+    if proxy:
+        kwargs["proxy"] = {"server": proxy}
+
+    try:
+        context = await playwright.chromium.launch_persistent_context(channel="chrome", **kwargs)
+    except Exception as exc:
+        logger.warning("system Chrome unavailable (%s); using bundled Chromium", exc)
+        context = await playwright.chromium.launch_persistent_context(**kwargs)
+    logger.info("persistent browser profile: %s (headless=%s)", path, headless)
+    return BrowserSession(context=context, playwright=playwright)

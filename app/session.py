@@ -13,7 +13,7 @@ from .util import slugify
 
 logger = logging.getLogger(__name__)
 
-LOGIN_URL = "https://pk-gr-services.gvcworld.eu/login/PK/en"
+LOGIN_URL = "https://pk-gr-services.gvcworld.eu/login/appointments/en?lang=en_US"
 LOGGED_IN_EXPECT = "/en/account"  # adjust after recon (§11)
 
 

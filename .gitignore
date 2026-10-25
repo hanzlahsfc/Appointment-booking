@@ -15,3 +15,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 recon/
+
+# Local agent/tooling state (Command Code taste, editor state)
+.commandcode/
+.agents/

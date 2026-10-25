@@ -15,6 +15,8 @@ import signal
 import sys
 
 from app.config import load_config
+from app.preflight import check_reachability
+from app.session import LOGIN_URL
 from app.crawler import CrawlerWorker
 from app.dashboard import DashboardState
 from app.notifier import Notifier
@@ -41,7 +43,37 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--demo", action="store_true", help="Run with fabricated slots for dashboard demo")
     p.add_argument("--port", type=int, default=8080, help="Dashboard port (default: 8080)")
     p.add_argument("--host", default="127.0.0.1", help="Dashboard bind address (default: 127.0.0.1)")
+    p.add_argument("--no-book", action="store_true", help="Disable auto-booking even if config enables it")
+    p.add_argument(
+        "--booking-mode",
+        choices=["off", "assist", "auto"],
+        default=None,
+        help="Override app.booking.mode for this run",
+    )
+    p.add_argument("--skip-preflight", action="store_true", help="Skip the egress reachability check")
     return p.parse_args()
+
+
+async def _preflight(cfg) -> None:
+    """Refuse to run booking behind a blocked egress.
+
+    Without this, a WAF-blocked IP looks like a healthy process that simply
+    never finds slots — the worst possible failure mode for this product.
+    """
+    result = await check_reachability(LOGIN_URL)
+    if result.ok:
+        logger.info("preflight ok: %s", result.detail)
+        return
+    if result.blocked:
+        logger.error("preflight: %s", result.detail)
+        if cfg.booking.enabled:
+            logger.error(
+                "refusing to start auto-booking from a WAF-blocked egress; "
+                "fix the network (docs/OPERATIONS.md §6) or pass --skip-preflight"
+            )
+            raise SystemExit(2)
+    else:
+        logger.warning("preflight: %s", result.detail)
 
 
 def _profiles_as_dicts(cfg):
@@ -52,6 +84,9 @@ def _profiles_as_dicts(cfg):
             "category": p.category,
             "location": p.location,
             "booking_url": p.booking_url,
+            "auto_book": p.auto_book,
+            "applicant_file": p.applicant_file,
+            "prefer": p.prefer,
         }
 
 
@@ -59,14 +94,22 @@ async def main() -> int:
     setup_logging()
     args = _parse_args()
     cfg = load_config()
+    if args.no_book:
+        cfg.booking.mode = "off"
+    elif args.booking_mode:
+        cfg.booking.mode = args.booking_mode
 
     logger.info(
-        "starting gvcw-crawler | profiles=%d | demo=%s | dry_run=%s | interval=%ds",
+        "starting gvcw-crawler | profiles=%d | demo=%s | dry_run=%s | interval=%ds | booking=%s",
         len(cfg.profiles),
         args.demo,
         cfg.app.dry_run,
         cfg.app.poll_interval_seconds,
+        cfg.booking.mode,
     )
+
+    if not args.demo and not args.skip_preflight:
+        await _preflight(cfg)
 
     os_environ_key = cfg.notifications.resend_api_key_env
     api_key = os.environ.get(os_environ_key, "")

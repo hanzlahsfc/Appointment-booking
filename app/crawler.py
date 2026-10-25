@@ -15,10 +15,19 @@ from typing import TYPE_CHECKING
 
 from playwright.async_api import Browser, BrowserContext
 
-from .browser import IncapsulaHandler, create_browser, new_context
+from .alarm import Alarm, AlarmConfig
+from .booking import BookingAgent, BookingStatus
+from .browser import (
+    BrowserSession,
+    IncapsulaHandler,
+    create_browser,
+    launch_persistent,
+    new_context,
+)
 from .config import Config
-from .diff import sort_by_date
+from .diff import select_bookable, sort_by_date
 from .notifier import Notifier
+from .site import PlaywrightSiteDriver, load_selectors
 from .session import (
     check_session_still_valid,
     ensure_logged_in,
@@ -82,6 +91,9 @@ class CrawlerWorker:
         self.dashboard = dashboard
         self.demo = demo
         self._browser: Browser | None = None
+        self._session: BrowserSession | None = None
+        self._alarm = Alarm(AlarmConfig(seconds=cfg.booking.alarm_seconds))
+        self._holding = False
         self._seen_keys: set[tuple] = set()
         # demo state
         self._demo_slots: list[dict] = []
@@ -90,10 +102,26 @@ class CrawlerWorker:
     # ── lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        if not self.demo:
-            self._browser = await create_browser(headless=self.cfg.app.headless)
+        if self.demo:
+            return
+        profile_dir = Path(self.cfg.booking.profile_dir)
+        if profile_dir.exists() and any(profile_dir.iterdir()):
+            # warm profile from the recon/login pass: no credentials needed
+            self._session = await launch_persistent(
+                profile_dir, headless=self.cfg.headless, proxy=self.cfg.proxy
+            )
+        else:
+            logger.warning(
+                "no warm Chrome profile at %s — falling back to storage_state login "
+                "(reCAPTCHA may block this; run recon.py once to create the profile)",
+                profile_dir,
+            )
+            self._browser = await create_browser(headless=self.cfg.headless)
 
     async def stop(self) -> None:
+        if self._session:
+            await self._session.aclose()
+            self._session = None
         if self._browser:
             await self._browser.close()
             self._browser = None
@@ -106,7 +134,10 @@ class CrawlerWorker:
             return
         state_path = storage_state_path(self.cfg.state_dir, self.profile["name"])
         creds_file = self.cfg.creds_dir / f"{self._slug(self.profile['name'])}.json"
-        context = await self._make_context(state_path, creds_file)
+        if self._session is not None:
+            context = self._session.context
+        else:
+            context = await self._make_context(state_path, creds_file)
         try:
             while True:
                 delay = jittered_delay(
@@ -225,7 +256,8 @@ class CrawlerWorker:
 
             slots = await self._fetch_slots(page)
             dur = time.perf_counter() - t0
-            new_count = len(self._process_slots(slots))
+            new_slots = self._process_slots(slots)
+            new_count = len(new_slots)
             self._up_dash(new_count=new_count, slots=slots)
             logger.info(
                 "OK | profile=%s | slots=%d | new=%d | dur=%.1fs",
@@ -234,6 +266,8 @@ class CrawlerWorker:
                 new_count,
                 dur,
             )
+            if new_slots:
+                await self._maybe_book(page, new_slots)
         except Exception as e:
             dur = time.perf_counter() - t0
             self._up_dash_error(str(e))
@@ -278,11 +312,11 @@ class CrawlerWorker:
     async def _dispatch_alert(self, slot: dict) -> None:
         """Send the alert and record it."""
         if self.notifier.dry_run:
-            await self.notifier.send(slot)
+            await self.notifier.send(slot, auto_book=self.cfg.booking.mode != "off")
             if self.dashboard:
                 self.dashboard.push_alert(slot, "dry-run")
             return
-        ok = await self.notifier.send(slot)
+        ok = await self.notifier.send(slot, auto_book=self.cfg.booking.mode != "off")
         sent_at = iso_pkt(now_pkt())
         subject = self.notifier.build_subject(slot)
         if ok:
@@ -290,6 +324,55 @@ class CrawlerWorker:
         self.store.log_alert(slot, sent_at=sent_at, subject=subject, status="sent" if ok else "failed")
         if self.dashboard:
             self.dashboard.push_alert(slot, "sent" if ok else "failed")
+
+    # ── auto-booking ──────────────────────────────────────────────────────
+
+    async def _maybe_book(self, page, new_slots: list[dict]) -> None:
+        """Claim the best new slot if this profile opted in.
+
+        Runs inline (awaited) rather than as a background task: one Playwright
+        page cannot be driven concurrently, and the next poll must not navigate
+        away from a slot we are holding for a human.
+        """
+        if not self.cfg.booking_enabled_for(self.profile["name"]):
+            return
+        slot = select_bookable(new_slots, self.profile.get("prefer"))
+        if slot is None:
+            logger.info("booking on, but no slot matched this profile's preferences")
+            return
+
+        driver = PlaywrightSiteDriver(page, load_selectors(self.cfg.booking.selectors_file))
+        agent = BookingAgent(
+            self.cfg,
+            self.profile,
+            self.store,
+            alarm=self._alarm,
+            dashboard=self.dashboard,
+            notifier=self.notifier,
+        )
+        result = await agent.book(slot, driver)
+        if result.status == BookingStatus.NEEDS_HUMAN.value:
+            await self._hold_for_human(result)
+        elif result.status == BookingStatus.ABORTED_UNKNOWN_STATE.value:
+            # never walk away from a possibly-held slot
+            await self._hold_for_human(result)
+
+    async def _hold_for_human(self, result) -> None:
+        """Stop polling so the page is left exactly as the claim left it."""
+        self._holding = True
+        logger.warning(
+            "HOLDING for human hand-off: %s %s | status=%s | the browser window is left "
+            "open and polling is paused — finish or check the booking, then restart the app",
+            result.slot.get("date"),
+            result.slot.get("time") or "",
+            result.status,
+        )
+        while self._holding:
+            await asyncio.sleep(30)
+            logger.warning(
+                "still holding the claimed slot (%s) — polling stays paused until restart",
+                result.slot.get("date"),
+            )
 
     # ── slot extraction (recon-driven, §11) ──────────────────────────────
 

@@ -16,6 +16,8 @@ class DashboardState:
         self._status: dict[str, dict] = {}
         self._slots: dict[str, list[dict]] = {}
         self._alerts: deque[dict] = deque(maxlen=max_alerts)
+        self._booking: dict[str, dict] = {}
+        self._bookings: deque[dict] = deque(maxlen=max_alerts)
         self.started_at = time.time()
 
     # ---- writers (crawler workers) --------------------------------------
@@ -45,6 +47,29 @@ class DashboardState:
                 }
             )
 
+    # ---- booking ---------------------------------------------------------
+
+    def set_booking(self, profile: str, **fields) -> None:
+        """Current booking state for a profile (shown on the profile card)."""
+        with self._lock:
+            self._booking.setdefault(profile, {}).update(fields)
+            self._booking[profile]["ts"] = time.time()
+
+    def push_booking(self, result: dict) -> None:
+        with self._lock:
+            self._bookings.appendleft(
+                {
+                    "ts": time.time(),
+                    "profile": result.get("profile"),
+                    "status": result.get("status"),
+                    "stage": result.get("stage"),
+                    "date": (result.get("slot") or {}).get("date"),
+                    "time": (result.get("slot") or {}).get("time"),
+                    "confirmation_ref": result.get("confirmation_ref"),
+                    "error": result.get("error"),
+                }
+            )
+
     # ---- readers (dashboard) --------------------------------------------
 
     def snapshot(self, app_cfg=None) -> dict:
@@ -54,10 +79,15 @@ class DashboardState:
                 "uptime": int(time.time() - self.started_at),
                 "now": time.time(),
                 "profiles": [
-                    {"name": name, **self._status.get(name, {})}
+                    {
+                        "name": name,
+                        **self._status.get(name, {}),
+                        "booking": self._booking.get(name, {}),
+                    }
                     for name in self._status
                 ],
                 "slots": {k: list(v) for k, v in self._slots.items()},
                 "alerts": list(self._alerts),
+                "bookings": list(self._bookings),
                 "config": app_cfg,
             }
