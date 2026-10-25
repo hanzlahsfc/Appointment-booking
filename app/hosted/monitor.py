@@ -36,6 +36,31 @@ logger = logging.getLogger(__name__)
 BLOCKED_RECHECK_SECONDS = 20
 
 
+def register_client_profiles(cfg: Config, clients: list[dict]) -> None:
+    """Append each client's profile to cfg.profiles.
+
+    BookingAgent's per-profile opt-in guard (cfg.booking_enabled_for) only
+    knows config profiles — registering clients there keeps the guard intact:
+    booking still requires BOTH a master mode (assist) AND the client row's
+    own auto_book flag. A client that exists only in hosted.db cannot book.
+    """
+    from ..config import ProfileConfig
+
+    for client in clients:
+        if cfg.profile_by_name(client["profile_name"]) is not None:
+            continue
+        cfg.profiles.append(
+            ProfileConfig(
+                name=client["profile_name"],
+                email="",
+                category=client["category"],
+                location=client["location"],
+                booking_url=client["booking_url"],
+                auto_book=bool(client.get("auto_book")),
+            )
+        )
+
+
 class ClientFeed:
     """The dashboard surface BookingAgent/CrawlerWorker push into, scoped to
     one client: every event also fans out to the client's live stream.
@@ -142,12 +167,14 @@ class HostedMonitor:
         client: dict,
         store: Store,
         manager: BrowserHostManager,
+        alarm=None,
     ):
         self.cfg = cfg
         self.client = client
         self.profile_name = client["profile_name"]
         self.store = store
         self.manager = manager
+        self._alarm = alarm
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self.feed: ClientFeed | None = None
@@ -313,6 +340,7 @@ class HostedMonitor:
             self.cfg,
             self._profile_dict(),
             self.store,
+            alarm=self._alarm,
             dashboard=self.feed,
             notifier=self.feed,
         )

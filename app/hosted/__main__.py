@@ -202,22 +202,11 @@ async def _serve(args) -> int:
     # booking is off unless the operator enables a mode AND the client row
     # opted in.
     monitors: list[HostedMonitor] = []
-    from app.config import ProfileConfig
+    from app.hosted.monitor import register_client_profiles
 
-    for client in hstore.list_clients():
-        if not client["active"]:
-            continue
-        if cfg.profile_by_name(client["profile_name"]) is None:
-            cfg.profiles.append(
-                ProfileConfig(
-                    name=client["profile_name"],
-                    email="",
-                    category=client["category"],
-                    location=client["location"],
-                    booking_url=client["booking_url"],
-                    auto_book=client["auto_book"],
-                )
-            )
+    clients = [c for c in hstore.list_clients() if c["active"]]
+    register_client_profiles(cfg, clients)
+    for client in clients:
         monitor = HostedMonitor(cfg, client, store, manager)
         monitor.start()
         monitors.append(monitor)

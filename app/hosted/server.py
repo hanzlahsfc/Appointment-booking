@@ -69,6 +69,7 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
             "id": client["id"],
             "username": client["username"],
             "display_name": client["display_name"],
+            "profile_name": client["profile_name"],
             "booking_url": client["booking_url"],
             "category": client["category"],
             "location": client["location"],
@@ -213,19 +214,22 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
                 await _send(event)
 
         async def _reader() -> None:
-            while True:
-                raw = await websocket.receive_text()
-                if len(raw) > MAX_WS_FRAME_BYTES:
-                    await _send({"type": "error", "message": "frame too large"})
-                    continue
-                try:
-                    message = json.loads(raw)
-                except ValueError:
-                    await _send({"type": "error", "message": "invalid JSON"})
-                    continue
-                if not isinstance(message, dict):
-                    continue
-                await _handle_input(client, browser, message, _send, budget)
+            try:
+                while True:
+                    raw = await websocket.receive_text()
+                    if len(raw) > MAX_WS_FRAME_BYTES:
+                        await _send({"type": "error", "message": "frame too large"})
+                        continue
+                    try:
+                        message = json.loads(raw)
+                    except ValueError:
+                        await _send({"type": "error", "message": "invalid JSON"})
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    await _handle_input(client, browser, message, _send, budget)
+            except WebSocketDisconnect:
+                return
 
         writer = asyncio.create_task(_writer())
         reader = asyncio.create_task(_reader())

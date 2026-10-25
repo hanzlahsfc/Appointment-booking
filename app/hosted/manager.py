@@ -211,9 +211,7 @@ class ClientBrowser:
             )
             return
         self.url = url
-        asyncio.get_running_loop().call_soon(
-            lambda: asyncio.ensure_future(self._push_status())
-        )
+        asyncio.ensure_future(self._push_status())
 
     async def _recover_nav(self) -> None:
         """Steer the tab back to the client's booking page after a blocked nav."""
@@ -375,7 +373,7 @@ class ClientBrowser:
             raise InputRejected("key is required")
         if len(key) != 1 and key not in ALLOWED_KEYS:
             raise InputRejected(f"key {key!r} is not in the allowed set")
-        name = " " if key in (" ", "Space") else key
+        name = "Space" if key in (" ", "Space") else key
         page = await self.ensure_page()
         if event == "press":
             await page.keyboard.press(name)
