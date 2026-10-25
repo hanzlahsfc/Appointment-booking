@@ -13,9 +13,12 @@
  * Design notes:
  *  - No native messaging host and no registry keys: the agent already serves
  *    HTTP/WebSocket on loopback, so the extension dials out to it.
- *  - The service worker stays alive because an open WebSocket resets the idle
- *    timer (Chrome 116+); a 30s alarm reconnects if Chrome ever drops it.
- *  - Nothing is automated until the operator has chosen a tab in the popup.
+ *  - An open WebSocket resets the service-worker idle timer (Chrome 116+); a 30s
+ *    alarm re-arms it, but only when the operator wants a connection.
+ *  - Disconnect is sticky: `desiredConnected` is persisted, so closing the
+ *    socket on purpose is not undone three seconds later by the reconnect path.
+ *  - Nothing is automated until the operator chooses a tab in the popup, and any
+ *    change of tab is pushed to the agent so it never commands a stale tab.
  */
 
 const DEFAULT_PORT = 8080;
@@ -24,13 +27,13 @@ const MAX_NETWORK_ENTRIES = 300;
 const PROTOCOL_VERSION = 1;
 
 let socket = null;
-let settings = { port: DEFAULT_PORT, tabId: null };
+let settings = { port: DEFAULT_PORT, tabId: null, desiredConnected: false, token: "" };
 let connecting = false;
 let lastError = null;
 
 /** Recent network activity per tab, for the recon pass. */
 const networkLog = new Map();
-/** Request metadata keyed by CDP requestId, so bodies can be joined later. */
+/** Request metadata keyed by "<tabId>:<requestId>" — tab-scoped, never global. */
 const pendingRequests = new Map();
 
 // ── settings ────────────────────────────────────────────────────────────────
@@ -39,25 +42,43 @@ async function loadSettings() {
   const stored = await chrome.storage.local.get({
     port: DEFAULT_PORT,
     tabId: null,
+    desiredConnected: false,
+    token: "",
   });
-  settings = { port: Number(stored.port) || DEFAULT_PORT, tabId: stored.tabId };
+  settings = {
+    port: Number(stored.port) || DEFAULT_PORT,
+    tabId: stored.tabId === undefined ? null : stored.tabId,
+    desiredConnected: Boolean(stored.desiredConnected),
+    token: stored.token || "",
+  };
   return settings;
+}
+
+async function setDesired(connected) {
+  settings.desiredConnected = connected;
+  await chrome.storage.local.set({ desiredConnected: connected });
 }
 
 // ── socket ──────────────────────────────────────────────────────────────────
 
+function isOpen() {
+  return Boolean(socket && socket.readyState === WebSocket.OPEN);
+}
+
 function status() {
   return {
-    connected: Boolean(socket && socket.readyState === WebSocket.OPEN),
+    connected: isOpen(),
+    desiredConnected: settings.desiredConnected,
     port: settings.port,
     tabId: settings.tabId,
+    tokenSet: Boolean(settings.token),
     lastError,
     protocol: PROTOCOL_VERSION,
   };
 }
 
 function send(payload) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  if (!isOpen()) return false;
   try {
     socket.send(JSON.stringify(payload));
     return true;
@@ -73,9 +94,12 @@ async function connect() {
     return;
   }
   await loadSettings();
+  if (!settings.desiredConnected) return; // explicit Connect only
+
   connecting = true;
   try {
-    socket = new WebSocket(`ws://127.0.0.1:${settings.port}/bridge`);
+    const token = settings.token ? `?token=${encodeURIComponent(settings.token)}` : "";
+    socket = new WebSocket(`ws://127.0.0.1:${settings.port}/bridge${token}`);
   } catch (err) {
     lastError = String(err);
     connecting = false;
@@ -100,11 +124,12 @@ async function connect() {
     } catch (err) {
       return;
     }
+    if (!message || typeof message !== "object") return;
     if (message.type === "ping") {
       send({ type: "pong" });
       return;
     }
-    if (message.id) handleRequest(message);
+    if (typeof message.id === "string") handleRequest(message);
   };
 
   socket.onerror = () => {
@@ -113,17 +138,37 @@ async function connect() {
 
   socket.onclose = () => {
     connecting = false;
+    socket = null;
     reconnectLater();
   };
 }
 
 function reconnectLater() {
+  if (!settings.desiredConnected) return;
   setTimeout(() => {
-    connect().catch(() => {});
+    if (settings.desiredConnected) connect().catch(() => {});
   }, RECONNECT_MS);
 }
 
+async function disconnect() {
+  await setDesired(false);
+  if (socket) {
+    try {
+      socket.close();
+    } catch (err) {
+      // already closing
+    }
+  }
+  socket = null;
+  return status();
+}
+
 // ── request handling ────────────────────────────────────────────────────────
+
+/** Accept both wire spellings so a protocol skew cannot silently break commands. */
+function tabIdOf(message) {
+  return message.tabId !== undefined ? message.tabId : message.tab_id;
+}
 
 async function handleRequest(message) {
   const { id, op } = message;
@@ -136,18 +181,27 @@ async function handleRequest(message) {
       case "tabs":
         result = await listTabs();
         break;
-      case "command":
-        result = await runCommand(message.tabId, message.method, message.params || {});
+      case "command": {
+        const method = message.method;
+        if (typeof method !== "string" || !method) {
+          throw new Error("command.method must be a non-empty string");
+        }
+        const params = message.params;
+        if (params !== undefined && (params === null || typeof params !== "object")) {
+          throw new Error("command.params must be an object");
+        }
+        result = await runCommand(tabIdOf(message), method, params || {});
         break;
+      }
       case "network":
-        result = readNetwork(message.tabId, message);
+        result = readNetwork(tabIdOf(message), message);
         break;
       case "networkClear":
-        clearNetwork(message.tabId);
+        clearNetwork(tabIdOf(message));
         result = { cleared: true };
         break;
       default:
-        throw new Error(`unknown op: ${op}`);
+        throw new Error(`unknown op: ${String(op)}`);
     }
     send({ id, ok: true, result });
   } catch (err) {
@@ -193,9 +247,20 @@ async function runCommand(tabId, method, params) {
 
 // ── network capture (recon needs request AND response bodies) ───────────────
 
+function requestKey(tabId, requestId) {
+  return `${tabId}:${requestId}`;
+}
+
 function logFor(tabId) {
   if (!networkLog.has(tabId)) networkLog.set(tabId, []);
   return networkLog.get(tabId);
+}
+
+function purgePending(tabId) {
+  const prefix = `${tabId}:`;
+  for (const key of [...pendingRequests.keys()]) {
+    if (key.startsWith(prefix)) pendingRequests.delete(key);
+  }
 }
 
 function truncate(value, limit = 200000) {
@@ -204,8 +269,9 @@ function truncate(value, limit = 200000) {
 }
 
 chrome.debugger.onEvent.addListener(async (source, method, params) => {
-  const tabId = source.tabId;
+  const tabId = source && source.tabId;
   if (!tabId) return;
+  const key = requestKey(tabId, params.requestId);
 
   if (method === "Network.requestWillBeSent") {
     const entry = {
@@ -217,13 +283,13 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
       postData: params.request.postData ? truncate(params.request.postData) : undefined,
       startedAt: Date.now(),
     };
-    pendingRequests.set(params.requestId, entry);
+    pendingRequests.set(key, entry);
     logFor(tabId).push(entry);
     return;
   }
 
   if (method === "Network.responseReceived") {
-    const entry = pendingRequests.get(params.requestId);
+    const entry = pendingRequests.get(key);
     if (entry) {
       entry.status = params.response.status;
       entry.mimeType = params.response.mimeType;
@@ -232,8 +298,20 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
     return;
   }
 
+  if (method === "Network.loadingFailed") {
+    // A failed request never reaches loadingFinished: finalise and drop it here
+    // so the pending map cannot grow without bound.
+    const entry = pendingRequests.get(key);
+    if (entry) {
+      entry.failed = true;
+      entry.errorText = params.errorText || "request failed";
+    }
+    pendingRequests.delete(key);
+    return;
+  }
+
   if (method === "Network.loadingFinished") {
-    const entry = pendingRequests.get(params.requestId);
+    const entry = pendingRequests.get(key);
     if (!entry) return;
     const interesting =
       /json|text|xml|javascript/i.test(entry.mimeType || "") ||
@@ -252,9 +330,25 @@ chrome.debugger.onEvent.addListener(async (source, method, params) => {
         // body may be evicted; metadata is still useful
       }
     }
-    pendingRequests.delete(params.requestId);
+    pendingRequests.delete(key);
     const log = logFor(tabId);
     while (log.length > MAX_NETWORK_ENTRIES) log.shift();
+  }
+});
+
+// Detaching (tab closed, debugger stolen) leaves nothing joinable behind.
+chrome.debugger.onDetach.addListener((source) => {
+  if (source && source.tabId) purgePending(source.tabId);
+});
+
+// Closing a tab must drop both its trace and its pending requests.
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  networkLog.delete(tabId);
+  purgePending(tabId);
+  if (settings.tabId === tabId) {
+    settings.tabId = null;
+    await chrome.storage.local.set({ tabId: null });
+    send({ type: "tabChanged", tabId: null });
   }
 });
 
@@ -281,16 +375,18 @@ function readNetwork(tabId, options = {}) {
 function clearNetwork(tabId) {
   if (tabId) {
     networkLog.delete(tabId);
+    purgePending(tabId);
     return;
   }
   networkLog.clear();
+  pendingRequests.clear();
 }
 
 // ── lifecycle ───────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create("bridge-keepalive", { periodInMinutes: 0.5 });
-  connect().catch(() => {});
+  connect().catch(() => {}); // no-op unless desiredConnected was already true
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -300,9 +396,9 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== "bridge-keepalive") return;
-  if (socket && socket.readyState === WebSocket.OPEN) {
+  if (isOpen()) {
     send({ type: "ping" });
-  } else {
+  } else if (settings.desiredConnected) {
     connect().catch(() => {});
   }
 });
@@ -310,16 +406,22 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // The popup drives connect/disconnect and tab selection.
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   (async () => {
+    if (!message || typeof message !== "object") {
+      respond(status());
+      return;
+    }
     if (message.type === "connect") {
+      await setDesired(true);
       await connect();
       respond(status());
     } else if (message.type === "disconnect") {
-      if (socket) socket.close();
-      socket = null;
-      respond(status());
+      respond(await disconnect());
     } else if (message.type === "selectTab") {
-      settings.tabId = message.tabId;
-      await chrome.storage.local.set({ tabId: message.tabId });
+      const tabId = Number(message.tabId);
+      settings.tabId = Number.isFinite(tabId) ? tabId : null;
+      await chrome.storage.local.set({ tabId: settings.tabId });
+      // Tell the agent immediately, so it stops commanding the previous tab.
+      send({ type: "tabChanged", tabId: settings.tabId });
       respond(status());
     } else if (message.type === "setPort") {
       settings.port = Number(message.port) || DEFAULT_PORT;
@@ -328,6 +430,10 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       socket = null;
       await connect();
       respond(status());
+    } else if (message.type === "setToken") {
+      settings.token = String(message.token || "");
+      await chrome.storage.local.set({ token: settings.token });
+      respond(status());
     } else {
       respond(status());
     }
@@ -335,4 +441,4 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   return true; // keep the message channel open for the async reply
 });
 
-connect().catch(() => {});
+connect().catch(() => {}); // resumes only if the operator left it connected

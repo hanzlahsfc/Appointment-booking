@@ -3,6 +3,7 @@
 const els = {
   dot: document.getElementById("dot"),
   port: document.getElementById("port"),
+  token: document.getElementById("token"),
   tab: document.getElementById("tab"),
   connect: document.getElementById("connect"),
   disconnect: document.getElementById("disconnect"),
@@ -19,11 +20,15 @@ function render(bridgeStatus) {
   els.dot.classList.toggle("on", Boolean(bridgeStatus && bridgeStatus.connected));
   if (bridgeStatus) {
     els.port.value = bridgeStatus.port;
-    els.error.textContent = bridgeStatus.lastError
-      ? `Last error: ${bridgeStatus.lastError}`
-      : bridgeStatus.connected
-        ? "Connected to the local agent."
-        : "Not connected — start the crawler, then press Connect.";
+    if (bridgeStatus.lastError) {
+      els.error.textContent = `Last error: ${bridgeStatus.lastError}`;
+    } else if (bridgeStatus.connected) {
+      els.error.textContent = "Connected to the local agent.";
+    } else if (bridgeStatus.desiredConnected) {
+      els.error.textContent = "Trying to reach the local agent — is the crawler running?";
+    } else {
+      els.error.textContent = "Disconnected. Press Connect when the crawler is running.";
+    }
   }
 }
 
@@ -47,6 +52,7 @@ async function refresh() {
 
 els.connect.addEventListener("click", async () => {
   await ask("setPort", { port: Number(els.port.value) });
+  if (els.token.value) await ask("setToken", { token: els.token.value });
   render(await ask("connect"));
 });
 
