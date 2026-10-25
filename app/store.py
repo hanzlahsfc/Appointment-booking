@@ -158,7 +158,11 @@ class Store:
 
     # ── booking ──────────────────────────────────────────────────────────
 
-    TERMINAL_STATUSES = ("booked", "failed", "slot_gone", "needs_human", "aborted_unknown_state")
+    TERMINAL_STATUSES = ("booked", "failed", "slot_gone", "needs_human", "aborted_unknown_state", "resolved")
+
+    # Finished statuses that may have left a slot held: a human was meant to
+    # take over, so the row blocks new bookings until resolve_booking() clears it.
+    UNRESOLVED_STATUSES = ("needs_human", "aborted_unknown_state")
 
     def reserve_booking_attempt(
         self, slot: dict, mode: str, started_at: str, status: str = "attempted"
@@ -223,6 +227,37 @@ class Store:
         ).fetchone()
         return row is not None
 
+    def unresolved_booking(self, profile: str) -> dict | None:
+        """Latest attempt that may have left a slot held for this profile.
+
+        needs_human / aborted_unknown_state mean a human was supposed to take
+        over; until the row is resolved, booking anything else risks navigating
+        away from (or double-claiming) that held slot. Keeping the check in the
+        DB — not in memory — is what makes it survive a restart.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM booking_log WHERE profile=?"
+            " AND status IN ('needs_human','aborted_unknown_state')"
+            " ORDER BY id DESC LIMIT 1",
+            (profile,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def resolve_booking(self, booking_id: int, resolved_status: str = "resolved") -> bool:
+        """Mark a held/ambiguous attempt as reviewed by a human.
+
+        Returns False when the row is not in an unresolved state, so a mistyped
+        id cannot silently "resolve" a booked appointment.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE booking_log SET status=? WHERE id=?"
+                " AND status IN ('needs_human','aborted_unknown_state')",
+                (resolved_status, booking_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     CLAIMED_STATUSES = ("attempted", "needs_human", "booked", "aborted_unknown_state")
 
     def booking_claimed_for_slot(self, slot: dict) -> bool:
@@ -240,10 +275,21 @@ class Store:
         ).fetchone()
         return row is not None
 
-    def booking_attempts_since(self, since_iso: str) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM booking_log WHERE started_at >= ?", (since_iso,)
-        ).fetchone()
+    def booking_attempts_since(self, since_iso: str, profile: str | None = None) -> int:
+        """Attempts since a timestamp, optionally scoped to one profile.
+
+        The rate cap is meant to be per profile: one busy applicant must not
+        exhaust the budget for every other profile in the same database.
+        """
+        if profile is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM booking_log WHERE started_at >= ?", (since_iso,)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM booking_log WHERE started_at >= ? AND profile = ?",
+                (since_iso, profile),
+            ).fetchone()
         return int(row["n"]) if row else 0
 
     def recent_bookings(self, limit: int = 50) -> list[dict]:

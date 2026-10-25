@@ -151,29 +151,43 @@ def _start_server(host: str, port: int):
     return server
 
 
-async def _run_workers(cfg, store, notifier, dashboard, demo: bool = False) -> None:
+async def _run_workers(
+    cfg,
+    store,
+    notifier,
+    dashboard,
+    demo: bool = False,
+    stop: asyncio.Event | None = None,
+) -> None:
     profiles = list(_profiles_as_dicts(cfg))
     if not profiles:
         logger.warning("no profiles configured; sleeping")
         await _sleep_forever()
         return
 
+    # The semaphore bounds simultaneous worker *startups* (browser launches are
+    # the spiky part). It must NOT wrap the whole run loop: run() never returns,
+    # so gating it would starve every profile beyond the concurrency limit.
     sem = asyncio.Semaphore(cfg.app.concurrency)
     workers = [CrawlerWorker(cfg, p, store, notifier, dashboard=dashboard, demo=demo) for p in profiles]
 
     async def _guard(w):
-        async with sem:
+        try:
             if not w.demo:
-                await w.start()
-            try:
-                await w.run()
-            finally:
-                if not w.demo:
-                    await w.stop()
+                async with sem:
+                    await w.start()
+            await w.run()
+        finally:
+            if not w.demo:
+                await w.stop()
 
-    tasks = [asyncio.create_task(_guard(w)) for w in workers]
+    tasks = [
+        asyncio.create_task(_guard(w), name=w.profile["name"])
+        for w in workers
+    ]
 
-    stop = asyncio.Event()
+    if stop is None:
+        stop = asyncio.Event()
 
     def _signal_handler(*_):
         logger.info("signal received; shutting down")
@@ -183,17 +197,41 @@ async def _run_workers(cfg, store, notifier, dashboard, demo: bool = False) -> N
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, _signal_handler)
-        except NotImplementedError:
+        except (NotImplementedError, RuntimeError):
+            # Windows loops have no signal handlers; Ctrl+C still arrives as
+            # KeyboardInterrupt, which cancels this coroutine → same cleanup.
             pass
 
-    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    for t in tasks:
-        if t.done():
-            exc = t.exception()
-            if exc:
-                logger.error("worker task ended with error: %s", exc)
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # Wait on the shutdown signal AND the workers. A worker that crashes or
+    # fails to start is logged and dropped — it never takes healthy workers
+    # down with it. Only the signal (or every worker exiting) ends this loop.
+    stop_wait = asyncio.create_task(stop.wait(), name="shutdown-signal")
+    pending = set(tasks)
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending | {stop_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_wait in done:
+                break
+            for t in done:
+                if t.cancelled():
+                    continue
+                exc = t.exception()
+                if exc is not None:
+                    logger.error("worker %r ended with error: %s", t.get_name(), exc)
+                else:
+                    logger.warning("worker %r exited; the rest keep running", t.get_name())
+        if not pending and not stop.is_set():
+            logger.error("all workers exited — nothing left to monitor")
+    finally:
+        stop_wait.cancel()
+        for t in tasks:
+            t.cancel()
+        # gather waits for every worker's finally: browser contexts and
+        # persistent sessions are closed before we return to main()'s cleanup.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(stop_wait, return_exceptions=True)
 
 
 async def _sleep_forever() -> None:

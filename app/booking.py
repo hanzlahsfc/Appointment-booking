@@ -22,7 +22,7 @@ from typing import Any
 
 from .alarm import Alarm, AlarmConfig
 from .config import Config
-from .site import SiteDriver, SiteNotConfigured, SlotNotFound
+from .site import SiteDriver, SiteNotConfigured, SlotNotFound, load_selectors
 from .store import Store
 from .util import iso_pkt, now_pkt, slugify
 
@@ -97,12 +97,20 @@ class BookingAgent:
         if guard is not None:
             return guard
 
+        if mode == "auto":
+            # Everything unattended booking needs is checked before anything is
+            # clicked: a failure here is a clean `failed`, never a held slot.
+            validation_error = self._validate_auto(driver)
+            if validation_error is not None:
+                return self._skip(BookingStatus.FAILED, slot, "validate", started,
+                                  validation_error)
+
         booking_id = self.store.reserve_booking_attempt(slot, mode, started)
         if booking_id is None:
             return self._skip(BookingStatus.SKIPPED_DUPLICATE, slot, "claim", started,
                               "another attempt is already in flight")
 
-        reserved = False
+        hold_possible = False
         stage = "open"
         try:
             await driver.open_booking_page(self.profile["booking_url"])
@@ -119,8 +127,11 @@ class BookingAgent:
                                           error="dry run: reserve not clicked")
 
             stage = "reserve"
+            # From here on the slot may be held even if the call raises: the
+            # click can land and a later command in the same step can time out.
+            # Every failure past this point is UNKNOWN, never a clean failure.
+            hold_possible = True
             await driver.reserve(slot)
-            reserved = True
 
             if mode == "assist":
                 return await self._hand_off(booking_id, slot, driver, started)
@@ -128,9 +139,15 @@ class BookingAgent:
             stage = "applicant"
             applicant = self._load_applicant()
             if not applicant:
-                return await self._finish(
-                    booking_id, BookingStatus.FAILED, slot, "applicant", started, driver=driver,
-                    error="auto mode needs applicant data at data/applicants/<slug>.json",
+                # The slot is already held. Hand it to a human and sound the
+                # alarm — reporting a clean failure here would let polling
+                # resume and navigate away from a held appointment. Normally
+                # unreachable: _validate_auto checks the file before reserving,
+                # this stays as the safety net if it vanishes mid-attempt.
+                return await self._hand_off(
+                    booking_id, slot, driver, started,
+                    error="auto mode has no applicant data at data/applicants/<slug>.json "
+                          "— finish the form by hand",
                 )
             await driver.fill_applicant(applicant)
 
@@ -148,25 +165,38 @@ class BookingAgent:
                                       driver=driver, confirmation_ref=ref)
 
         except SlotNotFound as exc:
+            # Raised before any click: the slot simply is not there any more.
             return await self._finish(booking_id, BookingStatus.SLOT_GONE, slot, "reserve", started,
                                       error=str(exc))
         except SiteNotConfigured as exc:
-            return await self._finish(booking_id, BookingStatus.FAILED, slot, stage, started,
+            status = (
+                BookingStatus.ABORTED_UNKNOWN_STATE if hold_possible else BookingStatus.FAILED
+            )
+            return await self._finish(booking_id, status, slot, stage, started, driver=driver,
                                       error=str(exc))
         except Exception as exc:
-            status = BookingStatus.ABORTED_UNKNOWN_STATE if reserved else BookingStatus.FAILED
+            status = BookingStatus.ABORTED_UNKNOWN_STATE if hold_possible else BookingStatus.FAILED
             logger.exception("booking failed for %s at stage %s", self.profile["name"], stage)
             return await self._finish(booking_id, status, slot, stage, started,
                                       driver=driver, error=f"{type(exc).__name__}: {exc}")
 
     # ── stages ───────────────────────────────────────────────────────────
 
-    async def _hand_off(self, booking_id: int, slot: dict, driver: SiteDriver, started: str) -> BookingResult:
-        """Assist mode: the slot is held, wake a human and leave the window alone."""
+    async def _hand_off(
+        self,
+        booking_id: int,
+        slot: dict,
+        driver: SiteDriver,
+        started: str,
+        error: str | None = None,
+    ) -> BookingResult:
+        """The slot is held: wake a human, leave the window exactly as it is."""
         message = (
             f"SLOT CLAIMED — {slot.get('category')} @ {slot.get('location')} "
             f"{slot.get('date')} {slot.get('time') or ''} — finish the form in the browser NOW"
         )
+        if error:
+            message = f"{message} ({error})"
         self.alarm.start(message)
         if self.dashboard is not None:
             self.dashboard.set_booking(
@@ -174,7 +204,7 @@ class BookingAgent:
                 stage="assist", slot=slot, started_at=started,
             )
         return await self._finish(booking_id, BookingStatus.NEEDS_HUMAN, slot, "assist", started,
-                                  driver=driver)
+                                  driver=driver, error=error)
 
     # ── guard ────────────────────────────────────────────────────────────
 
@@ -203,8 +233,20 @@ class BookingAgent:
             return self._skip(BookingStatus.SKIPPED_DUPLICATE, slot, "guard", started,
                               f"attempt {open_row['id']} is still in flight")
 
+        # A finished needs_human/aborted_unknown_state attempt means a slot may
+        # still be held for this profile. The block lives in the DB, so a
+        # restart does not quietly un-hold it — a human must resolve the row
+        # (Store.resolve_booking) before this profile books anything else.
+        unresolved = self.store.unresolved_booking(name)
+        if unresolved:
+            return self._skip(
+                BookingStatus.SKIPPED_DUPLICATE, slot, "guard", started,
+                f"attempt {unresolved['id']} ended {unresolved['status']} and is "
+                "unresolved — a slot may still be held; resolve it by hand first",
+            )
+
         window_start = iso_pkt(now_pkt() - timedelta(hours=1))
-        attempts = self.store.booking_attempts_since(window_start)
+        attempts = self.store.booking_attempts_since(window_start, profile=name)
         if attempts >= self.cfg.booking.max_attempts_per_profile_per_hour:
             return self._skip(BookingStatus.RATE_LIMITED, slot, "guard", started,
                               f"{attempts} attempts in the last hour (cap "
@@ -212,6 +254,36 @@ class BookingAgent:
         return None
 
     # ── helpers ──────────────────────────────────────────────────────────
+
+    def _validate_auto(self, driver: SiteDriver) -> str | None:
+        """Everything `auto` mode needs, checked BEFORE anything is clicked.
+
+        Returns an error string when unattended booking cannot safely proceed.
+        A failure found here is a clean `failed` — the slot is untouched, so
+        polling may continue normally.
+        """
+        selectors = getattr(driver, "selectors", None)
+        if selectors is None:
+            # drivers that do not carry their selectors are checked against the
+            # same file the crawler loads for PlaywrightSiteDriver
+            selectors = load_selectors(self.cfg.booking.selectors_file)
+        missing = [
+            name
+            for name, value in (
+                ("applicant_fields", selectors.applicant_fields),
+                ("submit_button", selectors.submit_button),
+                ("confirmation_marker", selectors.confirmation_marker),
+            )
+            if not value
+        ]
+        if missing:
+            return (
+                "auto mode needs selectors " + ", ".join(missing)
+                + " — run recon.py and fill recon/booking-selectors.json"
+            )
+        if not self._load_applicant():
+            return "auto mode needs applicant data at data/applicants/<slug>.json"
+        return None
 
     def _load_applicant(self) -> dict:
         applicant_file = self.profile.get("applicant_file")
