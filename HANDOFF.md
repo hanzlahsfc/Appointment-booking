@@ -8,7 +8,10 @@ State as of 2026-10-26. Branch: `hosted-client` (forked from `extension-only` @ 
   (`data/hosted.db`), BrowserHostManager, HostedMonitor, FastAPI server,
   client-dashboard SPA, CLI, fake-portal admin API, 11 unit tests
 - `aec9166` — e2e proof: full client flow on real browsers + nav-guard tests
-- pending — this file + docs/HOSTED.md + demo script + config block
+- `1f41c2e` — docs/HOSTED.md, this file, demo script, config block,
+  screencast seeding fix
+- `4651737` — Bearer-token auth + AB_API_BASE + dashboard_origins CORS +
+  start_hosted.cmd + cloudflared example (Vercel/tunnel ready)
 
 ## What works (verified, not claimed)
 
@@ -44,10 +47,10 @@ State as of 2026-10-26. Branch: `hosted-client` (forked from `extension-only` @ 
 
 ## Exact next steps
 
-1. `client-dashboard/` → Vercel static deploy; set `window.AB_API_BASE` or
-   serve from the tunnel origin; add SameSite=None cookie path for cross-site.
-2. `cloudflared tunnel` in front of `http://127.0.0.1:8081`; restrict via
-   Cloudflare Access or keep token-only; document Windows autostart.
+1. Deploy `client-dashboard/` to Vercel (static, zero build); at deploy time
+   set `config.js` → `window.AB_API_BASE = "https://<tunnel-host>"`.
+2. `cloudflared tunnel` per `deploy/cloudflared.example.yml`; add the Vercel
+   origin to `hosted.dashboard_origins`; Bearer auth already works cross-site.
 3. Offline/reconnect polish in the SPA (skeleton exists: 2 s reconnect).
 4. Real-portal provisioning path: recon → selectors JSON → `add-client`
    without `--preset`.
