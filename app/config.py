@@ -97,6 +97,10 @@ class HostedConfig:
     max_input_events_per_second: int = 60
     viewport_width: int = 1366
     viewport_height: int = 900
+    # Origins allowed to call the API cross-origin (the Vercel dashboard).
+    # Empty = same-origin only. Auth is Bearer-token, so CORS never carries
+    # credentials — the header is explicit on every request.
+    dashboard_origins: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -197,6 +201,10 @@ def _parse_hosted(raw: dict[str, Any], root: Path) -> HostedConfig:
         max_input_events_per_second=int(h.get("max_input_events_per_second", 60)),
         viewport_width=int(h.get("viewport_width", 1366)),
         viewport_height=int(h.get("viewport_height", 900)),
+        dashboard_origins=[
+            str(o).rstrip("/")
+            for o in (h.get("dashboard_origins", []) or [])
+        ],
     )
 
 

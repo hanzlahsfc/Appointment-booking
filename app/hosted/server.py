@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from ..config import Config
@@ -60,6 +61,16 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
     app = FastAPI(title="Appointment Booker — Hosted", docs_url=None, redoc_url=None)
     app.state.runtime = runtime
     rt = runtime
+
+    # Only needed once the dashboard lives on Vercel (a different origin).
+    # Token auth means no cookies travel — allow_credentials stays off.
+    if rt.cfg.hosted.dashboard_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(rt.cfg.hosted.dashboard_origins),
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
 
     def _client_or_401(request: Request) -> dict | None:
         return auth.client_of(rt.hstore, auth.extract_token(request))
@@ -304,6 +315,10 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
     @app.get("/style.css")
     async def style_css():
         return FileResponse(DASHBOARD_DIR / "style.css")
+
+    @app.get("/config.js")
+    async def config_js():
+        return FileResponse(DASHBOARD_DIR / "config.js")
 
     return app
 

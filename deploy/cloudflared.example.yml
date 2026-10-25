@@ -1,0 +1,24 @@
+# Cloudflare Tunnel example — exposes the hosted backend to the Vercel
+# dashboard. Fill in after `cloudflared tunnel create appointment-booker`.
+#
+#   cloudflared tunnel --config deploy\cloudflared.example.yml run
+#
+# tunnel: <tunnel-id>
+# credentials-file: C:\Users\<you>\.cloudflared\<tunnel-id>.json
+tunnel: REPLACE_ME
+credentials-file: REPLACE_ME
+
+ingress:
+  # The hosted API + WebSocket stream. One hostname is enough; the SPA on
+  # Vercel points at it via window.AB_API_BASE.
+  - hostname: booker-api.example.com
+    service: http://127.0.0.1:8081
+    originRequest:
+      noTLSVerify: false
+  - service: http_status:404
+
+# Then in config.yaml:
+#   hosted:
+#     dashboard_origins: ["https://<your-vercel-app>.vercel.app"]
+# and in client-dashboard/config.js at deploy time:
+#   window.AB_API_BASE = "https://booker-api.example.com";

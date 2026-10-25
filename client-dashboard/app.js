@@ -13,6 +13,10 @@
 const API = window.AB_API_BASE || "";
 const $ = (id) => document.getElementById(id);
 
+/* Bearer token works both same-origin (local server) and cross-origin
+ * (Vercel dashboard -> tunnel). The cookie set at login still covers same-
+ * origin refreshes; the stored token covers everything else. */
+let token = localStorage.getItem("ab_token") || null;
 let ws = null;
 let wsState = "closed";
 let manualControl = false;
@@ -23,10 +27,12 @@ let lastMove = 0;
 /* ── login ─────────────────────────────────────────────────────────── */
 
 async function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
   const resp = await fetch(API + path, {
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers,
   });
   return resp;
 }
@@ -46,6 +52,9 @@ $("login-form").addEventListener("submit", async (e) => {
     $("login-error").textContent = data.error || "sign-in failed";
     return;
   }
+  const data = await resp.json();
+  token = data.token;
+  localStorage.setItem("ab_token", token);
   showMain();
 });
 
@@ -53,6 +62,9 @@ async function boot() {
   const resp = await api("/api/me");
   if (resp.ok) {
     showMain();
+  } else {
+    token = null;
+    localStorage.removeItem("ab_token");
   }
 }
 
@@ -64,15 +76,25 @@ function showMain() {
 
 $("btn-logout").addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" });
+  localStorage.removeItem("ab_token");
   location.reload();
 });
 
 /* ── websocket ─────────────────────────────────────────────────────── */
 
+function wsBase() {
+  if (API) {
+    const u = new URL(API);
+    return `${u.protocol === "https:" ? "wss" : "ws"}://${u.host}`;
+  }
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.host}`;
+}
+
 function connect() {
   if (ws && ws.readyState <= WebSocket.OPEN) return;
-  const scheme = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${scheme}://${location.host}/ws/screen`);
+  const q = token ? `?token=${encodeURIComponent(token)}` : "";
+  ws = new WebSocket(`${wsBase()}/ws/screen${q}`);
   wsState = "connecting";
   setConn("connecting…");
 
