@@ -1,10 +1,13 @@
 # GVCW Appointment Slot Monitor
 
-24/7 crawler that watches the Greece visa appointment portal (GVCW Pakistan) and emails an alert the moment a **new work-permit / premiere-launch appointment slot** opens. Booking stays manual — **no auto-booking**.
+24/7 crawler that watches the Greece visa appointment portal (GVCW Pakistan) and alerts the moment a **new work-permit / premiere-launch appointment slot** opens.
+
+It can also **claim the slot for you**. In `assist` mode (the recommended live setting) it selects the slot, clicks reserve, then sounds a repeating local alarm and emails you, so a human finishes the applicant form in the already-open browser window. `auto` mode also fills the form and submits unattended. Booking is **off by default** and must be enabled per profile — see [Auto-booking](#auto-booking).
 
 - Monitors per applicant profile (multiple profiles supported)
 - Passes the Imperva/Incapsula WAF by driving a real Chromium browser
 - Diffs each poll vs. SQLite state; alerts only on slots never seen before
+- Can claim the slot (`off` / `assist` / `auto`), one booking per profile, enforced in SQLite
 - Web dashboard (`http://<host>:8080`) shows live worker status, slots, and the alert feed
 - Demo mode (`--demo`) fabricates realistic slots so you can screenshot/pitch without real credentials
 - Runs on a ~$5/mo Hetzner VPS (Docker or systemd)
@@ -71,6 +74,46 @@ First dry-run safety check:
 
 ---
 
+## Auto-booking
+
+Off by default. Enable it in `config.yaml`:
+
+```yaml
+app:
+  booking:
+    mode: "assist"        # off | assist | auto
+    dry_run: true         # walk the flow, never click reserve
+    alarm_seconds: 120    # how long the local alarm repeats
+    headless: false       # assist needs a visible window to take over
+
+profiles:
+  - name: "Ahmed - Work Permit"
+    auto_book: true       # per-profile opt-in
+```
+
+**There is no automatic login.** The sign-in form carries a reCAPTCHA, so you sign in
+**once**, by hand, in the browser window `recon.py` opens; that warm Chrome profile
+(`data/chrome-profile/`) is reused on every later run. That is also why **no GVCW password
+is stored anywhere** — `data/creds/` only feeds a legacy fallback login.
+
+**Site selectors are recon-gated.** Until `recon/booking-selectors.json` exists the agent
+refuses to act rather than clicking blindly on a visa portal:
+
+```bash
+python recon.py --profile "Ahmed - Work Permit"   # sign in, click the picker, Ctrl+C
+cp docs/booking-selectors.example.json recon/booking-selectors.json
+# then fill it using recon/booking-flow.json (the recorded endpoint map)
+```
+
+| mode | behaviour |
+|---|---|
+| `off` | monitor and email only (default) |
+| `assist` | claims the slot, alarms, emails, then **pauses polling and leaves the browser open** so you finish the form |
+| `auto` | also fills `data/applicants/<slug>.json` and submits |
+
+Assist mode deliberately stops polling, so **restart the app** once you have finished (or
+abandoned) the booking. Run with `--no-book` to force booking off for a single run.
+
 ## Project layout
 
 ```
@@ -89,6 +132,11 @@ gvcw-crawler/
 │   ├── store.py             # SQLite: slot state + alert log
 │   ├── notifier.py          # Resend email client (retry / dry-run)
 │   ├── util.py              # PKT timezone helper, poll jitter, slugify
+│   ├── booking.py           # BookingAgent: claim a slot, hand off or submit
+│   ├── site.py              # all recon-gated selectors + Playwright interaction
+│   ├── alarm.py             # repeating local alarm (non-blocking)
+│   ├── preflight.py         # egress/WAF check so a blocked IP fails loudly
+│   ├── recorder.py          # request/response capture -> HAR + booking-flow.json
 │   ├── dashboard.py         # in-process live state → dashboard
 │   ├── web.py               # FastAPI: serves UI + /api/status
 │   └── static/index.html    # the web dashboard

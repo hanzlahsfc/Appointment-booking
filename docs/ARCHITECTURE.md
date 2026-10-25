@@ -175,4 +175,12 @@ sqlite logic / fill the constants, then update `tests/` with realistic fixtures.
 - Secrets: `.env` only, never in `config.yaml`.
 - VPS: no public ports except the closed-loop dashboard (bind `127.0.0.1`);
   key-only SSH; container drops all capabilities and uses `no-new-privileges`.
-- No auto-booking: the crawler only reads; humans book.
+- Booking is off by default and opted into per profile. It only ever claims a
+  slot matching the profile's own category and location, only one booking per
+  profile (enforced by a partial unique index on `booking_log`), and never
+  retries a failure that happened after the reserve click — that case is
+  recorded as `aborted_unknown_state` for a human to check. `--no-book` forces
+  it off for a run.
+- No GVCW password is stored. The browser runs on a warm persistent profile
+  (`data/chrome-profile/`) that a human signed into once, which is also the only
+  way past the login reCAPTCHA. Treat that directory as a credential.

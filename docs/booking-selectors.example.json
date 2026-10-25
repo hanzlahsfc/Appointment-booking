@@ -1,0 +1,30 @@
+{
+  "_readme": [
+    "Copy this to recon/booking-selectors.json and fill each value from a real",
+    "recon pass (recon/findings.txt + recon/booking-flow.json). The agent refuses",
+    "to book until vac_select, category_select, slot_row and reserve_button are set.",
+    "Several selectors accept a comma-separated fallback list, e.g. 'a, b'.",
+    "Keys prefixed with _ are ignored by the loader."
+  ],
+
+  "vac_select": "",
+  "category_select": "",
+  "slot_row": "",
+  "reserve_button": "",
+
+  "applicant_fields": {
+    "passport": "",
+    "fullname": "",
+    "dob": "",
+    "email": "",
+    "phone": ""
+  },
+  "submit_button": "",
+  "confirmation_marker": "",
+
+  "token_inputs": ["form_build_id", "form_token", "form_id"],
+
+  "reserve_endpoint": null,
+  "csrf_header": null,
+  "_deferred": "reserve_endpoint/csrf_header are for the hybrid replay path; unused until the recon pass identifies the reserve call."
+}

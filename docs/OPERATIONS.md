@@ -117,14 +117,26 @@ IP), or add a residential proxy.
 | Login "did not redirect (expected /en/account…)" | `LOGGED_IN_EXPECT` wrong → fix after recon (§5) |
 | Emails marked spam | Resend domain not verified / missing SPF-DKIM → fix in Resend |
 | Duplicate alerts after restart | should not happen (SQLite). If DB was deleted, re-alerts are expected by design |
+| Bot claimed a slot and stopped polling | assist mode does this by design — finish the applicant form in the open browser window, then restart the app |
+| Booking fails with "selectors are not configured" | the recon pass is outstanding: create `recon/booking-selectors.json` (README → Auto-booking) |
+| `preflight: ... 403 ...` then exit code 2 | egress has no Incapsula clearance → §6 |
+| `needs a warm Chrome profile` warning | the persistent profile is empty; run `recon.py` once to sign in |
 
 ## 8. Testing
 
 ```bash
-.venv/bin/python -m pytest tests
+python -m pytest tests          # 52 tests
 ```
 
-11 tests cover the acceptance clauses in §10.1:
+Four of those are browser-driven end-to-end booking tests that run against a mock
+portal in `tests/fake_portal/` — no network, credentials or open slots required.
+You can also run the mock by hand and click through it yourself:
+
+```bash
+python tests/fake_portal/app.py     # http://127.0.0.1:8099
+```
+
+The diffing/alert acceptance clauses in §10.1 remain covered:
 
 - same slots → no alert
 - new slot → alert
@@ -138,4 +150,7 @@ IP), or add a residential proxy.
 - [ ] credential files `chmod 600`
 - [ ] VPS: no public ports; SSH key-only, no password
 - [ ] Rate discipline respected (default 5-min ± jitter — do not lower aggressively)
-- [ ] No auto-booking code enabled
+- [ ] Booking mode is deliberate (`off` unless a slot is genuinely expected) and
+      `dry_run: true` while rehearsing
+- [ ] `data/chrome-profile/` treated as a credential (it holds the logged-in
+      session) and never committed
