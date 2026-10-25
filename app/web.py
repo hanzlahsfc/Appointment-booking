@@ -81,6 +81,29 @@ async def bridge_status():
     )
 
 
+@app.get("/api/bridge/network")
+async def bridge_network(tab: int, limit: int = 100, urlIncludes: str | None = None):
+    """Dump the network traffic the extension captured on a tab.
+
+    Bridge-based recon: once the debugger has attached to the operator's tab
+    (any driven poll does this), every request/response — including POST
+    bodies — lands in the extension's per-tab log. Clicking through the slot
+    picker while the crawler runs records the availability endpoints, which is
+    how recon/booking-selectors.json gets filled without Playwright or CDP.
+    """
+    try:
+        client = HUB.client()
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    try:
+        entries = await client.network(
+            tab_id=tab, limit=limit, urlIncludes=urlIncludes
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse({"tab": tab, "entries": entries})
+
+
 @app.websocket("/bridge")
 async def bridge_socket(websocket: WebSocket) -> None:
     """The browser extension connects here and answers CDP commands.

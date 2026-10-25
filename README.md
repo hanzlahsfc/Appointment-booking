@@ -284,6 +284,7 @@ Consequences:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the system works end to end
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — infrastructure, Docker, systemd, VPS
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — running, monitoring, troubleshooting, recon
+- [`docs/LIVE-VALIDATION.md`](docs/LIVE-VALIDATION.md) — supervised Windows runbook (bridge recon, dry-run guarantees, authorized booking step)
 
 ## Recon notes (§11)
 

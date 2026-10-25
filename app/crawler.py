@@ -520,9 +520,11 @@ class CrawlerWorker:
 
     def _normalize_raw_slots(self, rows: list[str]) -> list[dict]:
         out = []
+        skipped = 0
         for raw in rows:
             parsed = self._parse_slot_label(raw)
             if parsed is None:
+                skipped += 1
                 logger.debug("unparsed slot row, skipped: %r", raw[:80])
                 continue
             date_str, time_str = parsed
@@ -536,6 +538,17 @@ class CrawlerWorker:
                     "raw": raw,
                 }
             )
+        if rows and not out:
+            # Visible, not silent: every row the selector caught was
+            # unparseable — wrong slot_row or an unsupported label format.
+            logger.warning(
+                "profile %s: %d slot rows matched but NONE parsed "
+                "(supported: YYYY-MM-DD | DD.MM.YYYY | DD/MM/YYYY [+HH:MM]) — "
+                "check slot_row and label formats",
+                self.profile["name"], len(rows),
+            )
+        elif skipped:
+            logger.info("profile %s: %d/%d rows unparsed", self.profile["name"], skipped, len(rows))
         return out
 
     @staticmethod
