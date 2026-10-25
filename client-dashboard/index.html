@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Appointment Booker</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<section id="login-view" class="center-card">
+  <form id="login-form" class="card">
+    <h1>Appointment Booker</h1>
+    <p class="muted">Sign in to your monitoring dashboard</p>
+    <input id="login-username" autocomplete="username" placeholder="Username" required>
+    <input id="login-password" type="password" autocomplete="current-password" placeholder="Password" required>
+    <button type="submit">Sign in</button>
+    <p id="login-error" class="error"></p>
+  </form>
+</section>
+
+<section id="main-view" class="hidden">
+  <header>
+    <div>
+      <h1>Appointment Booker</h1>
+      <span id="client-name" class="muted"></span>
+    </div>
+    <div class="header-actions">
+      <span id="conn" class="pill">offline</span>
+      <button id="btn-home" title="Open the portal page">Portal page</button>
+      <button id="btn-control">Take control</button>
+      <button id="btn-logout" class="ghost">Sign out</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <main>
+    <div id="screen-wrap">
+      <img id="screen" alt="remote browser" draggable="false">
+      <div id="screen-overlay" class="overlay">connecting…</div>
+    </div>
+
+    <aside>
+      <div class="card">
+        <h2>Monitoring</h2>
+        <div id="monitor-status" class="muted">—</div>
+        <div id="booking-status"></div>
+      </div>
+      <div class="card">
+        <h2>Open slots <span id="slot-count" class="muted"></span></h2>
+        <ul id="slots" class="feed"></ul>
+      </div>
+      <div class="card">
+        <h2>Alerts</h2>
+        <ul id="alerts" class="feed"></ul>
+      </div>
+      <div class="card">
+        <h2>Bookings</h2>
+        <ul id="bookings" class="feed"></ul>
+      </div>
+    </aside>
+  </main>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

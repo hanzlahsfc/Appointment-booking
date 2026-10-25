@@ -69,6 +69,37 @@ class ProfileConfig:
 
 
 @dataclass
+class HostedConfig:
+    """Hosted-client layer: remote browser sessions for provisioned accounts.
+
+    Everything here defaults to the safe option: the mock portal is only ever
+    reachable when allow_mock_portal is set explicitly, and browsers are
+    headless so a hosted session can never surface a desktop window.
+    """
+
+    enabled: bool = False
+    bind: str = "127.0.0.1"
+    port: int = 8081
+    db_path: Path = field(default_factory=lambda: ROOT / "data" / "hosted.db")
+    browsers_dir: Path = field(default_factory=lambda: ROOT / "data" / "hosted-browsers")
+    session_ttl_hours: int = 12
+    # Idle manual-control sessions hand the browser back to automation.
+    manual_idle_seconds: int = 900
+    poll_interval_seconds: int = 30
+    headless: bool = True
+    # Test-only allowance: without this, provisioning or navigating to the mock
+    # portal is refused even if a stale client row still lists its origin.
+    allow_mock_portal: bool = False
+    mock_portal_url: str = "http://127.0.0.1:8099"
+    screen_quality: int = 60
+    screen_max_width: int = 1366
+    screen_max_height: int = 900
+    max_input_events_per_second: int = 60
+    viewport_width: int = 1366
+    viewport_height: int = 900
+
+
+@dataclass
 class NotificationsConfig:
     resend_api_key_env: str = "RESEND_API_KEY"
     from_addr: str = "GVCW Slot Alert <oncall@yourdomain.com>"
@@ -81,6 +112,7 @@ class Config:
     profiles: list[ProfileConfig]
     notifications: NotificationsConfig
     booking: BookingConfig = field(default_factory=BookingConfig)
+    hosted: HostedConfig = field(default_factory=HostedConfig)
     proxy: str | None = None  # e.g. socks5://user:pass@host:1080 or http://host:3128
     root: Path = ROOT
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
@@ -145,6 +177,29 @@ def _parse_booking(raw: dict[str, Any], root: Path) -> BookingConfig:
     )
 
 
+def _parse_hosted(raw: dict[str, Any], root: Path) -> HostedConfig:
+    h = raw.get("hosted", {}) or {}
+    return HostedConfig(
+        enabled=_parse_bool(h.get("enabled", False), False),
+        bind=str(h.get("bind", "127.0.0.1")),
+        port=int(h.get("port", 8081)),
+        db_path=Path(h.get("db_path", root / "data" / "hosted.db")),
+        browsers_dir=Path(h.get("browsers_dir", root / "data" / "hosted-browsers")),
+        session_ttl_hours=int(h.get("session_ttl_hours", 12)),
+        manual_idle_seconds=int(h.get("manual_idle_seconds", 900)),
+        poll_interval_seconds=int(h.get("poll_interval_seconds", 30)),
+        headless=_parse_bool(h.get("headless", True), True),
+        allow_mock_portal=_parse_bool(h.get("allow_mock_portal", False), False),
+        mock_portal_url=str(h.get("mock_portal_url", "http://127.0.0.1:8099")).rstrip("/"),
+        screen_quality=int(h.get("screen_quality", 60)),
+        screen_max_width=int(h.get("screen_max_width", 1366)),
+        screen_max_height=int(h.get("screen_max_height", 900)),
+        max_input_events_per_second=int(h.get("max_input_events_per_second", 60)),
+        viewport_width=int(h.get("viewport_width", 1366)),
+        viewport_height=int(h.get("viewport_height", 900)),
+    )
+
+
 def load_config(path: str | Path | None = None) -> Config:
     load_dotenv(ROOT / ".env")
     cfg_path = Path(path) if path else ROOT / "config.yaml"
@@ -205,6 +260,7 @@ def load_config(path: str | Path | None = None) -> Config:
         profiles=profiles,
         notifications=notifications,
         booking=_parse_booking(app_raw, ROOT),
+        hosted=_parse_hosted(raw, ROOT),
         proxy=(raw.get("network", {}) or {}).get("proxy"),
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)

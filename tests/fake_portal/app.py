@@ -215,6 +215,35 @@ def create_app(state: PortalState | None = None) -> FastAPI:
             '<h2 id="confirmation">{ref}</h2><p>Keep this reference.</p>'.format(ref=reference),
         )
 
+    # ── test-only admin ───────────────────────────────────────────────────
+    # These endpoints only exist because this process IS the fake portal; they
+    # let the hosted-demo and e2e tests seed/inspect slots without touching a
+    # database. The fake portal only ever runs on loopback.
+
+    @app.post("/__admin__/slots")
+    async def admin_add_slot(request: Request):
+        body = await request.json()
+        portal.add_slot(
+            str(body["date"]), str(body["time"]),
+            vac=str(body.get("vac", "lahore")),
+            category=str(body.get("category", "national_d_employment")),
+        )
+        return {"ok": True, "slots": len(portal.slots)}
+
+    @app.post("/__admin__/reset")
+    async def admin_reset():
+        portal.reset()
+        return {"ok": True}
+
+    @app.get("/__admin__/state")
+    async def admin_state():
+        return {
+            "slots": list(portal.slots),
+            "held": list(portal.held),
+            "bookings": list(portal.bookings),
+            "reserve_calls": portal.reserve_calls,
+        }
+
     return app
 
 
