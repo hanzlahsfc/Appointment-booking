@@ -19,6 +19,8 @@ python3 -m venv .venv
 bash scripts/start_hosted.sh
 ```
 
+Windows equivalent: `scripts\start_monitor.cmd` (same args).
+
 - Prints the dashboard URL (http://127.0.0.1:8081) and, on first run, the
   client's one-time access code.
 - Launches one isolated, visible Chromium (`data/monitor-browsers/`). It is
