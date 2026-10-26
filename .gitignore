@@ -19,3 +19,5 @@ recon/
 # Local agent/tooling state (Command Code taste, editor state)
 .commandcode/
 .agents/
+.vercel
+.env*
