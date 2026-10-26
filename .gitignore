@@ -19,3 +19,8 @@ recon/
 # Local agent/tooling state (Command Code taste, editor state)
 .commandcode/
 .agents/
+
+# Downloaded local deployment binaries
+tools/
+.vercel/
+

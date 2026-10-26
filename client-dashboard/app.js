@@ -30,7 +30,7 @@ async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const resp = await fetch(API + path, {
-    credentials: "include",
+    credentials: API && new URL(API, location.href).origin !== location.origin ? "omit" : "same-origin",
     ...opts,
     headers,
   });

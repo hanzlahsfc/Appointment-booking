@@ -43,6 +43,8 @@ ALLOWED_KEYS = {
 ALLOWED_BUTTONS = {"left", "middle", "right"}
 MAX_TEXT_LEN = 2000
 MAX_WHEEL = 2400
+# Challenge providers may embed documents, but may never become the top page.
+CHALLENGE_FRAME_HOSTS = {"hcaptcha.com", "www.hcaptcha.com", "newassets.hcaptcha.com", "challenges.cloudflare.com", "www.google.com", "www.recaptcha.net"}
 #: Frames a slow subscriber may buffer before we start dropping the oldest.
 SUBSCRIBER_QUEUE = 90
 
@@ -182,16 +184,23 @@ class ClientBrowser:
 
     async def _route_guard(self, route) -> None:
         request = route.request
-        if request.is_navigation_request() and not self._allowed(request.url):
+        challenge_frame = (
+            request.is_navigation_request()
+            and request.frame.parent_frame is not None
+            and urlsplit(request.url).scheme == "https"
+            and urlsplit(request.url).hostname in CHALLENGE_FRAME_HOSTS
+        )
+        if request.is_navigation_request() and not challenge_frame and not self._allowed(request.url):
             logger.warning(
                 "blocked navigation for client %s -> %s", self.client_id, request.url
             )
             self._note_blocked(request.url)
             self.publish({"type": "nav_blocked", "url": request.url})
             await route.abort()
-            asyncio.get_running_loop().call_later(
-                0.4, lambda: asyncio.ensure_future(self._recover_nav())
-            )
+            if request.frame.parent_frame is None:
+                asyncio.get_running_loop().call_later(
+                    0.4, lambda: asyncio.ensure_future(self._recover_nav())
+                )
             return
         await route.continue_()
 

@@ -105,3 +105,6 @@ unresolved `needs_human` booking for `client:demo` (id=1) — resolve or
 delete both DBs before re-demoing. `data/hosted-browsers/` holds the demo
 browser profile.
 
+
+For current startup, site adaptation, deployment and troubleshooting commands, read [docs/AGENT-STARTUP.md](docs/AGENT-STARTUP.md).
+

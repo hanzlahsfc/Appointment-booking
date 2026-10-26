@@ -136,10 +136,11 @@ class HostedStore:
             raise ValueError("at least one allowed origin is required")
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO clients (username, display_name, access_code_hash,"
+                "INSERT INTO clients (password_hash, username, display_name, access_code_hash,"
                 " created_at, profile_name, booking_url, category, location,"
-                " allowed_origins, selectors, auto_book) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " allowed_origins, selectors, auto_book) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
+                    "",  # Legacy databases have NOT NULL without a default.
                     username,
                     display_name.strip() or username,
                     hash_password(code),

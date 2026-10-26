@@ -288,6 +288,12 @@ class HostedMonitor:
         page = await browser.ensure_page()
         driver = PlaywrightSiteDriver(page, selectors)
 
+        # Do not repeatedly navigate away while a human is signing in locally.
+        if await driver.is_login_page():
+            self._throttle_status("awaiting_login", "awaiting login",
+                                  "Sign in, then release manual control to resume")
+            return
+
         t0 = time.perf_counter()
         await driver.open_booking_page(self.client["booking_url"])
         await driver.wait_for_waf()
@@ -421,6 +427,8 @@ class HostedMonitor:
                     "raw": raw,
                 }
             )
+        if rows and not out:
+            raise SiteNotConfigured("Slot rows matched but none parsed; check date format and selectors")
         return out
 
     def _process(self, slots: list[dict]) -> list[dict]:
