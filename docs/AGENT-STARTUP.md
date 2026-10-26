@@ -64,6 +64,12 @@ A public information page loading does not establish booking health. HTTP 200 ca
 Official Greece entry: https://pk-gr.gvcworld.eu/en/schedule-appointment
 Observed linked booking URL: https://pk-gr-services.gvcworld.eu/login/appointments/en
 
+2026-10-26 measured access split (same machine, same minute): the info domain
+above loads; the booking domain returns ERR_HTTP2_PROTOCOL_ERROR in Chromium
+and an Incapsula shell page over HTTP/1.1 curl. The egress IP is flagged on
+the services host specifically — switch networks/proxy before recon, do not
+debug the app for this.
+
 ## Public dashboard and backend connection
 
 The dashboard is currently local. Existing Vercel authentication was observed on this host, but no successful deployment URL is recorded. Before deployment verify all client-dashboard files contain no credentials.

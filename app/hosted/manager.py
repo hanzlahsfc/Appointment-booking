@@ -105,7 +105,12 @@ class ClientBrowser:
         self.context = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile),
             headless=self.cfg.headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                # The GVCW services host hard-resets HTTP/2 for flagged
+                # egress IPs (ERR_HTTP2_PROTOCOL_ERROR); h2 is not required.
+                "--disable-http2",
+            ],
             viewport={
                 "width": self.cfg.viewport_width,
                 "height": self.cfg.viewport_height,
