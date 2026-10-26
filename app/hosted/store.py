@@ -190,6 +190,21 @@ class HostedStore:
             self._conn.commit()
         return code if cur.rowcount > 0 else None
 
+    def update_selectors(self, client_id: int, patch: dict[str, Any]) -> bool:
+        """Merge keys into the client's selectors JSON (portal, applicant_file,
+        target_date, scan_days — portal-shape knobs live here)."""
+        client = self.get_client(client_id)
+        if client is None:
+            return False
+        merged = dict(client.get("selectors") or {})
+        merged.update({k: v for k, v in patch.items() if v is not None})
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE clients SET selectors=? WHERE id=?",
+                (json.dumps(merged), client_id),
+            )
+        return True
+
     def set_active(self, client_id: int, active: bool) -> bool:
         with self._lock:
             cur = self._conn.execute(

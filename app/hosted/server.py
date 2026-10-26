@@ -185,6 +185,52 @@ def create_app(runtime: HostedRuntime) -> FastAPI:
                                 status_code=409)
         return JSONResponse(await monitor.check_completion_now())
 
+    def _monitor_or_409(client: dict) -> "HostedMonitor | JSONResponse":
+        monitor = rt.monitor_for(client["id"])
+        if monitor is None:
+            return JSONResponse({"error": "no monitor for this client"},
+                                status_code=409)
+        return monitor
+
+    @app.post("/api/booking/otp/request")
+    async def otp_request(request: Request):
+        """Ask the portal to SMS the client a one-time password."""
+        client = _client_or_401(request)
+        if client is None:
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+        monitor = _monitor_or_409(client)
+        if isinstance(monitor, JSONResponse):
+            return monitor
+        return JSONResponse(await monitor.request_otp())
+
+    @app.post("/api/booking/otp")
+    async def otp_enter(request: Request):
+        """Type the client-received SMS code into the portal form."""
+        client = _client_or_401(request)
+        if client is None:
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        monitor = _monitor_or_409(client)
+        if isinstance(monitor, JSONResponse):
+            return monitor
+        return JSONResponse(await monitor.submit_otp(str(body.get("code", ""))))
+
+    @app.post("/api/booking/confirm")
+    async def booking_confirm(request: Request):
+        """The client's explicit authorization for the final submit click.
+        Verified against the portal's /appointments/result/{ref} redirect —
+        an ambiguous outcome stays parked, never booked, never retried."""
+        client = _client_or_401(request)
+        if client is None:
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+        monitor = _monitor_or_409(client)
+        if isinstance(monitor, JSONResponse):
+            return monitor
+        return JSONResponse(await monitor.confirm_book())
+
     @app.post("/api/browser/home")
     async def browser_home(request: Request):
         """Send the client's browser back to their own portal booking page."""

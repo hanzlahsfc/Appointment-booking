@@ -148,6 +148,9 @@ aside h2 { font-size: 14px; margin: 0 0 8px; }
 #booking-status .booked { color: var(--accent); font-weight: 700; }
 .small { font-size: 12px; margin-top: 6px; }
 #booking-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+#otp-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+#otp-actions input { max-width: 110px; }
+button.danger { background: #b3331d; border-color: #b3331d; }
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
 .status-dot.ok { background: var(--accent); }
 .status-dot.error, .status-dot.holding { background: var(--danger); }

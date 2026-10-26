@@ -65,6 +65,11 @@ def _cmd_add_client(args) -> int:
                 import json
 
                 selectors = json.loads(Path(args.selectors_file).read_text())
+            for key in ("portal", "target_date", "scan_days", "bookingfor",
+                        "members", "method", "applicant_file"):
+                value = getattr(args, key, None)
+                if value is not None:
+                    selectors[key] = value
             fields = {
                 "profile_name": args.profile_name or f"client:{args.username}",
                 "booking_url": args.booking_url,
@@ -167,6 +172,66 @@ def _cmd_seed_mock(args) -> int:
         return 1
     print(f"seeded slot {args.date} {args.time} @ {args.vac} ({args.category})")
     return 0
+
+
+def _cmd_seed_gvcw(args) -> int:
+    import httpx
+
+    cfg = load_config()
+    url = f"{cfg.hosted.mock_portal_url}/__admin__/gvcw-slots"
+    try:
+        resp = httpx.post(
+            url,
+            json={"date": args.date, "time": args.time,
+                  "category": args.category, "available": args.available},
+            timeout=5,
+        )
+    except Exception as exc:
+        print(f"could not reach mock portal at {url}: {exc}", file=sys.stderr)
+        return 1
+    if resp.status_code != 200:
+        print(f"mock portal refused: {resp.status_code} {resp.text}", file=sys.stderr)
+        return 1
+    print(f"seeded gvcw slot {args.date} {args.time} (category {args.category})")
+    return 0
+
+
+def _cmd_set_applicant(args) -> int:
+    """Attach private applicant data to a client.
+
+    The file is copied into data/applicants/ (gitignored, stays on this
+    machine) and referenced from the client's selectors. It is used to
+    prefill the portal form after a slot is selected — never sent anywhere
+    but the client's own browser page.
+    """
+    import json
+    import shutil
+
+    from app.util import slugify
+
+    cfg = load_config()
+    store = HostedStore(cfg.hosted.db_path, cfg.db_path)
+    try:
+        client = store.client_by_username(args.username)
+        if client is None:
+            print(f"no such client: {args.username}", file=sys.stderr)
+            return 1
+        src = Path(args.file)
+        try:
+            json.loads(src.read_text())  # must be a JSON object
+        except (OSError, ValueError) as exc:
+            print(f"not a readable JSON file: {exc}", file=sys.stderr)
+            return 1
+        dest_dir = cfg.data_dir / "applicants"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        name = slugify(client["profile_name"])
+        shutil.copyfile(src, dest_dir / f"{name}.json")
+        store.update_selectors(client["id"], {"applicant_file": name})
+        print(f"applicant data attached to {client['username']} "
+              f"(data/applicants/{name}.json — local only)")
+        return 0
+    finally:
+        store.close()
 
 
 # ── serve ────────────────────────────────────────────────────────────────
@@ -318,6 +383,18 @@ def _build_parser() -> argparse.ArgumentParser:
     add.add_argument("--location", default=None)
     add.add_argument("--selectors-file", default=None)
     add.add_argument("--auto-book", action="store_true")
+    add.add_argument("--portal", choices=["gvcw"], default=None,
+                     help="use the real search-driven portal driver")
+    add.add_argument("--target-date", default=None,
+                     help="DD/MM/YYYY or YYYY-MM-DD — search this date only")
+    add.add_argument("--scan-days", type=int, default=None,
+                     help="otherwise scan N days ahead (default 14)")
+    add.add_argument("--bookingfor", default=None, help="'0' individual / '1' group")
+    add.add_argument("--members", type=int, default=None)
+    add.add_argument("--method", default=None,
+                     help="appointmentmethod 1-4 (1=same time)")
+    add.add_argument("--applicant-file", default=None,
+                     help="basename of data/applicants/<name>.json for prefill")
 
     sub.add_parser("list-clients")
 
@@ -334,6 +411,18 @@ def _build_parser() -> argparse.ArgumentParser:
     seed.add_argument("--time", required=True)
     seed.add_argument("--vac", default="lahore")
     seed.add_argument("--category", default="national_d_employment")
+
+    gseed = sub.add_parser("seed-gvcw", help="add a gvcw-replica slot to the mock")
+    gseed.add_argument("--date", required=True, help="DD/MM/YYYY")
+    gseed.add_argument("--time", required=True, help="HH:MM")
+    gseed.add_argument("--category", default="26")
+    gseed.add_argument("--available", type=int, default=1)
+
+    ap = sub.add_parser(
+        "set-applicant",
+        help="copy a private applicant JSON into data/applicants/ and attach it")
+    ap.add_argument("username")
+    ap.add_argument("--file", required=True, help="path to applicant JSON (PII — never committed)")
     return p
 
 
@@ -361,6 +450,10 @@ def main() -> int:
         return _cmd_set_active(args, False)
     if args.cmd == "seed-mock":
         return _cmd_seed_mock(args)
+    if args.cmd == "seed-gvcw":
+        return _cmd_seed_gvcw(args)
+    if args.cmd == "set-applicant":
+        return _cmd_set_applicant(args)
     return 2
 
 

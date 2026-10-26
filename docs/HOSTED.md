@@ -120,3 +120,31 @@ schtasks /create /tn "AppointmentBookerHosted" /sc onlogon ^
 - VPS deployment; one Playwright-managed Chromium per client already works —
   containers/noVNC only if scale demands it
 - Residential proxies for the real portal's WAF (tested blocked from this IP)
+
+## Real-portal flow (gvcw driver)
+
+Clients provisioned with `selectors.portal = "gvcw"` use `app/gvcw.py`
+(`GvcwSiteDriver`), the search-driven picker decoded from the live portal:
+
+- `category` is the `#type` option value (`26` seasonal D, `2` national D);
+  `location`/`vac` is bound to the account — no centre select exists.
+- Detection: per date in `selectors.scan_days` (default 14, or a single
+  `selectors.target_date`), the driver fills `#datefrom`, clicks
+  `#btn-search`, and waits for `#result` or `#resultMessage`. A timeout or
+  missing marker raises — it never reports zero on a failed read.
+- Matching slot → click `.appointment_slot_enabled` (client-side
+  `selectTime`), prefill `gp_*` applicant fields from
+  `data/applicants/<name>.json` (private, gitignored — attach with
+  `python -m app.hosted set-applicant USER --file applicant.json`), then the
+  client alarm fires. Selection alone never reserves anything server-side.
+- Client completes OTP + reCAPTCHA: dashboard "Request SMS code"
+  (`POST /api/booking/otp/request`) → SMS → code entry
+  (`POST /api/booking/otp`) → captcha solved in the streamed browser →
+  **Confirm and book** (`POST /api/booking/confirm`).
+- Confirm is verified: success = redirect to `/appointments/result/{ref}`,
+  which flips the held row to `booked` with the ref. A portal error or an
+  ambiguous outcome leaves the attempt parked (`needs_human`) — never
+  retried, never booked falsely.
+
+Tested end-to-end against the gvcw-faithful mock in
+`tests/test_gvcw_e2e.py` (full sequence + lost-slot parking).

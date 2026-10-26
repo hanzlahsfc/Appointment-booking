@@ -268,6 +268,8 @@ function ackedKey() {
 
 function setBookingActions(show) {
   $("booking-actions").classList.toggle("hidden", !show);
+  const otp = $("otp-actions");
+  if (otp) otp.classList.toggle("hidden", !show);
 }
 
 function startAlarm(key) {
@@ -321,6 +323,46 @@ $("btn-finished").addEventListener("click", async () => {
     setBookingActions(false);
   } else {
     showBanner(data.error || "Confirmation not visible yet — finish the form first.", 6000);
+  }
+});
+
+/* ── assisted booking: OTP + explicit confirm ────────────────────────
+ * The portal only holds a slot when #btn-new-appointment posts with a real
+ * SMS OTP and solved captcha. These buttons drive that workflow; nothing is
+ * automatic. "Confirm and book" is the explicit final authorization.
+ */
+$("btn-otp-request").addEventListener("click", async () => {
+  const resp = await api("/api/booking/otp/request", { method: "POST" });
+  const data = await resp.json().catch(() => ({}));
+  showBanner(data.ok
+    ? "OTP requested — check your phone for the SMS code."
+    : (data.error || "OTP request failed."), 6000);
+});
+
+$("btn-otp-send").addEventListener("click", async () => {
+  const code = ($("otp-code").value || "").trim();
+  if (!code) { showBanner("Enter the SMS code first.", 4000); return; }
+  const resp = await api("/api/booking/otp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  showBanner(data.ok
+    ? "Code entered — solve the captcha in the browser, then Confirm and book."
+    : (data.error || "Could not enter the code."), 6000);
+});
+
+$("btn-confirm-book").addEventListener("click", async () => {
+  if (!confirm("Submit the booking now? This is the final step — the portal will reserve the appointment.")) return;
+  const resp = await api("/api/booking/confirm", { method: "POST" });
+  const data = await resp.json().catch(() => ({}));
+  if (data.ok) {
+    stopAlarm();
+    showBanner(`Booking confirmed (${data.confirmation_ref || "ok"}).`, 0);
+    setBookingActions(false);
+  } else {
+    showBanner(data.error || "Submit outcome unclear — check the browser before retrying.", 0);
   }
 });
 

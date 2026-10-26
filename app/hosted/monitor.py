@@ -26,6 +26,7 @@ from ..booking import BookingAgent, BookingStatus
 from ..config import Config
 from ..crawler import CrawlerWorker
 from ..diff import select_bookable, sort_by_date
+from ..gvcw import GvcwSiteDriver
 from ..site import BookingSelectors, PlaywrightSiteDriver, SiteNotConfigured
 from ..store import Store
 from ..util import iso_pkt, now_pkt
@@ -286,7 +287,7 @@ class HostedMonitor:
             return
 
         page = await browser.ensure_page()
-        driver = PlaywrightSiteDriver(page, selectors)
+        driver = self._driver_for(page, selectors)
 
         # Do not repeatedly navigate away while a human is signing in locally.
         if await driver.is_login_page():
@@ -307,7 +308,7 @@ class HostedMonitor:
             )
             return
 
-        if not selectors.configured or not selectors.slot_row:
+        if not self._is_gvcw() and (not selectors.configured or not selectors.slot_row):
             self._throttle_status(
                 "error", "configuration",
                 "monitoring selectors are not configured for this client",
@@ -336,6 +337,17 @@ class HostedMonitor:
         if new_slots and not browser.is_manual:
             await self._maybe_book(browser, driver, new_slots)
 
+    def _is_gvcw(self) -> bool:
+        return (self.client.get("selectors") or {}).get("portal") == "gvcw"
+
+    def _driver_for(self, page, selectors: BookingSelectors):
+        """The real portal is a search-driven picker; clients configured with
+        selectors.portal == 'gvcw' get the GVCW driver, everything else keeps
+        the select-and-row driver used by the mock."""
+        if self._is_gvcw():
+            return GvcwSiteDriver(page, self.client.get("selectors") or {})
+        return PlaywrightSiteDriver(page, selectors)
+
     def _throttle_status(self, status: str, throttle: str, message: str) -> None:
         self.feed.set_status(
             self.profile_name, status=status, message=message,
@@ -349,13 +361,13 @@ class HostedMonitor:
     async def _check_completion(self, browser) -> str | None:
         """Read-only look at the current page for the confirmation marker."""
         selectors = self._selectors
-        if not selectors or not selectors.confirmation_marker:
+        if not self._is_gvcw() and (not selectors or not selectors.confirmation_marker):
             return None
         page = browser.page
         if page is None or page.is_closed():
             return None
         try:
-            return await PlaywrightSiteDriver(page, selectors).confirmation_ref()
+            return await self._driver_for(page, selectors).confirmation_ref()
         except Exception:
             return None
 
@@ -406,6 +418,94 @@ class HostedMonitor:
                     "confirmation_ref": ref}
         return {"pending": True, "status": "needs_human",
                 "error": "no confirmation marker on the page yet"}
+
+    # ── assisted-booking actions (OTP, explicit confirm) ─────────────────
+    #
+    # The real portal's reserve = client-side slot selection; the actual hold
+    # only happens when #btn-new-appointment POSTs with a valid SMS OTP and a
+    # solved captcha. These dashboard-driven actions gate on an unresolved
+    # needs_human row — no held slot, no action.
+
+    async def _live_driver(self):
+        browser = self.manager.browser_for(self.client["id"])
+        if browser is None or browser.page is None or browser.page.is_closed():
+            return None
+        return self._driver_for(browser.page, self._selectors)
+
+    def _held_row(self) -> dict | None:
+        row = self.store.unresolved_booking(self.profile_name)
+        if row and row["status"] == "needs_human":
+            return row
+        return None
+
+    async def request_otp(self) -> dict:
+        """Client asked the portal to SMS a one-time password. Requires a
+        claimed (client-side selected) slot — the portal itself refuses OTP
+        requests without #selectedtime."""
+        if self._held_row() is None:
+            return {"ok": False, "error": "no held booking to act on"}
+        driver = await self._live_driver()
+        if not isinstance(driver, GvcwSiteDriver):
+            return {"ok": False, "error": "OTP flow needs the gvcw portal driver"}
+        try:
+            err = await driver.request_otp()
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if err:
+            return {"ok": False, "error": err}
+        self.feed.set_booking(self.profile_name, stage="otp", status="needs_human")
+        return {"ok": True}
+
+    async def submit_otp(self, code: str) -> dict:
+        """Fill the OTP the client received by SMS into the portal form."""
+        if self._held_row() is None:
+            return {"ok": False, "error": "no held booking to act on"}
+        driver = await self._live_driver()
+        if not isinstance(driver, GvcwSiteDriver):
+            return {"ok": False, "error": "OTP flow needs the gvcw portal driver"}
+        code = (code or "").strip()
+        if not code:
+            return {"ok": False, "error": "empty code"}
+        try:
+            await driver.enter_otp(code)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True}
+
+    async def confirm_book(self) -> dict:
+        """'Confirm and book' — the explicit final-submit authorization.
+
+        Clicks #btn-new-appointment and verifies the /appointments/result/{ref}
+        redirect. An explicit portal error or an ambiguous response both leave
+        the attempt parked as needs_human — never retried, never booked.
+        """
+        row = self._held_row()
+        if row is None:
+            return {"ok": False, "error": "no held booking to confirm"}
+        driver = await self._live_driver()
+        if not isinstance(driver, GvcwSiteDriver):
+            return {"ok": False, "error": "confirm needs the gvcw portal driver"}
+        try:
+            await driver.submit()
+            outcome = await driver.submit_outcome()
+        except Exception as exc:
+            outcome = {"error": f"{type(exc).__name__}: {exc}"}
+        ref = outcome.get("ok")
+        if ref:
+            self._record_completion(row, ref)
+            return {"ok": True, "confirmation_ref": ref}
+        err = outcome.get("error") or (
+            "submit produced no confirmation — the slot may or may not be "
+            "booked; verify the page before doing anything else"
+        )
+        self.feed.set_booking(
+            self.profile_name, status="needs_human", stage="submit", error=err,
+        )
+        self.feed.set_status(
+            self.profile_name, status="needs_human",
+            message=f"submit outcome unclear: {err}",
+        )
+        return {"ok": False, "error": err}
 
     # ── slot processing + booking ────────────────────────────────────────
 
@@ -479,6 +579,15 @@ class HostedMonitor:
             # The remote hand-off: the client sees this on their stream and in
             # the dashboard, then takes control and finishes the form. Polling
             # stays parked via the unresolved booking row until resolved.
+            # GVCW: prefill the applicant fields from private local storage so
+            # the client only has to do OTP + captcha + confirm.
+            if isinstance(driver, GvcwSiteDriver):
+                applicant = agent._load_applicant()
+                if applicant:
+                    try:
+                        await driver.fill_applicant(applicant)
+                    except Exception:
+                        logger.warning("applicant prefill failed", exc_info=True)
             self.feed.set_status(
                 self.profile_name, status="needs_human",
                 message="a slot was claimed — take control and finish the form",
@@ -491,6 +600,7 @@ class HostedMonitor:
             "category": self.client["category"],
             "location": self.client["location"],
             "booking_url": self.client["booking_url"],
+            "applicant_file": (self.client.get("selectors") or {}).get("applicant_file"),
             "auto_book": self.client.get("auto_book", False),
             "prefer": {},
         }

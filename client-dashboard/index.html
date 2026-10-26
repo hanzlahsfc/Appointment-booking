@@ -53,6 +53,12 @@
           <button id="btn-ack">Acknowledge alert</button>
           <button id="btn-finished" class="ghost">I completed the booking</button>
         </div>
+        <div id="otp-actions" class="hidden">
+          <button id="btn-otp-request">Request SMS code</button>
+          <input id="otp-code" type="text" inputmode="numeric" maxlength="8" placeholder="SMS code" autocomplete="off">
+          <button id="btn-otp-send" class="ghost">Enter code</button>
+          <button id="btn-confirm-book" class="danger">Confirm and book</button>
+        </div>
       </div>
       <div class="card">
         <h2>Open slots <span id="slot-count" class="muted"></span></h2>
