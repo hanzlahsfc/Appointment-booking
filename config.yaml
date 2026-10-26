@@ -34,6 +34,8 @@ hosted:
   headless: true                # hosted browsers never open windows
   allow_mock_portal: false      # TEST ONLY — enables tests/fake_portal
   mock_portal_url: "http://127.0.0.1:8099"
+  dashboard_origins:            # exact origins allowed to call the API cross-origin
+    - "https://gvcw-slot-monitor.vercel.app"
 
 profiles:
   - name: "Ahmed - Work Permit"

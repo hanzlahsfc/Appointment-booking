@@ -139,7 +139,7 @@ async def wait_for_human_login(page: Page, timeout: int, poll: int = 3) -> str:
     raise TimeoutError(f"no sign-in detected after {timeout}s (still at {page.url})")
 
 
-async def wait_for_login_form(page: Page, timeout: int = 90) -> None:
+async def wait_for_login_form(page: Page, timeout: int = 600) -> None:
     """Wait until a login form renders, or the WAF blocks us."""
     t0 = time.time()
     while time.time() - t0 < timeout:
