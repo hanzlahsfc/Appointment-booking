@@ -24,3 +24,6 @@ recon/
 tools/
 .vercel/
 
+# Generated distributables
+artifacts/
+appointment-booker-extension.zip
