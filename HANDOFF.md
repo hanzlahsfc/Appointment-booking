@@ -1,3 +1,5 @@
+> Read [docs/PROJECT-CONTEXT.md](docs/PROJECT-CONTEXT.md) first for the accepted scope and latest conversation handoff. This older handoff contains superseded test counts, credentials-based commands, and unverified recovery instructions.
+
 # HANDOFF — hosted-client branch
 
 State as of 2026-10-26. Branch: `hosted-client` (forked from `extension-only` @ 47a6db2).
@@ -102,3 +104,4 @@ python scripts\demo_hosted.py --username demo --password demo-pass-123 --seed "2
 unresolved `needs_human` booking for `client:demo` (id=1) — resolve or
 delete both DBs before re-demoing. `data/hosted-browsers/` holds the demo
 browser profile.
+
