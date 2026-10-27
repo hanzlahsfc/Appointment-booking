@@ -73,6 +73,11 @@ class ApplicantQueue:
             "SELECT * FROM applicants ORDER BY position, id").fetchall()
         return [self._row(r) for r in rows]
 
+    def get(self, app_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM applicants WHERE id=?", (app_id,)).fetchone()
+        return self._row(row) if row else None
+
     def current(self) -> dict | None:
         """The first applicant not yet done — the one being worked."""
         row = self._conn.execute(

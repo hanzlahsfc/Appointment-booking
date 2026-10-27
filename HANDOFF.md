@@ -109,3 +109,31 @@ STILL TO DO (in order):
 Real-portal state: live /add page verified via devtools-extension bridge
 (tab must be signed in). Search requires DOB+passport filled (validator);
 fill_applicant runs BEFORE _search. Centre = account-bound (vac=138).
+
+## Windows-app milestone — status
+
+Done + tested (154 tests green):
+- `app/queue.py` — ApplicantQueue: position-ordered, SQLite-persisted,
+  statuses queued/monitoring/selected-awaiting-human/submitting/booked/
+  failed/outcome_unknown, sha256(surname+passport) identity dedup, `get()`.
+- `app/localapp.py` — LocalMonitor: queue-driven detect→select→prefill→
+  handoff; OTP/Confirm are operator actions; verified /result/{ref} marks
+  booked and advances; ambiguous → outcome_unknown (parked, never retried).
+- `app/localserver.py` — local FastAPI dashboard + API (token pairing),
+  hosts `ws://127.0.0.1:8080/bridge` for the bundled extension.
+- `app/ws_page.py` — Playwright-shaped page over the project's own WS
+  bridge (extension) — the preferred transport, no devtools-extension.
+- `app/cdp_bridge.py` — same surface over devtools-extension HTTP :1232
+  (operator/testing path; kept, not wired into the app).
+- `tests/test_localapp.py` — sequential 2-applicant booking, restart
+  persistence, ambiguous-submit parking, duplicate-identity rejection (3).
+- SETUP.bat / START.bat / CLIENT-README.md / package_app.py (ZIP builder).
+
+Search freshness: `_search` hooks fetch+XHR for the periodslot PUT and
+waits on ITS completion — stale markers can't pass; un-fired searches
+(validator) error. reCAPTCHA on /add is normal — challenge = Incapsula +
+no booking form. `_daterange` is inclusive (same-day range = one date).
+
+Still open: live smoke of the WS extension pairing + a first supervised
+real booking; SETUP/START only lightly exercised on this machine
+(Python 3.12); no real-Windows extract+run e2e yet.

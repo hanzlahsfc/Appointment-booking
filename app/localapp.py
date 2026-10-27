@@ -39,7 +39,7 @@ def _daterange(date_from: str | None, date_to: str | None,
     start = parse(date_from) or date.today()
     end = parse(date_to) or (start + timedelta(days=default_days))
     return [_dmy(start + timedelta(days=i))
-            for i in range(max(0, (end - start).days))]
+            for i in range(max(1, (end - start).days + 1))]
 
 
 class LocalMonitor:
