@@ -43,11 +43,11 @@ def _daterange(date_from: str | None, date_to: str | None,
 
 
 class LocalMonitor:
-    def __init__(self, queue: ApplicantQueue, bridge_base: str,
+    def __init__(self, queue: ApplicantQueue, page_factory,
                  allowed_origin: str, *, interval: int = 60,
                  category: str = "26"):
         self.queue = queue
-        self.bridge_base = bridge_base
+        self.page_factory = page_factory   # async callable -> gated page
         self.allowed_origin = allowed_origin
         self.interval = max(30, interval)
         self.category = category
@@ -120,9 +120,7 @@ class LocalMonitor:
             pass
 
     async def _cycle(self, applicant: dict) -> None:
-        client = BridgeClient(self.bridge_base)
-        page = await client.page(
-            self.tab_id, [self.allowed_origin], allow_writes=True)
+        page = await self.page_factory()
         driver = GvcwSiteDriver(page, {"bookingfor": "0", "method": "1"})
 
         category = applicant.get("category") or self.category
@@ -231,9 +229,7 @@ class LocalMonitor:
     async def _driver(self):
         if self.tab_id is None:
             return None
-        client = BridgeClient(self.bridge_base)
-        page = await client.page(
-            self.tab_id, [self.allowed_origin], allow_writes=True)
+        page = await self.page_factory()
         return GvcwSiteDriver(page, {"bookingfor": "0", "method": "1"})
 
     def snapshot(self) -> dict:

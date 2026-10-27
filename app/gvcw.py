@@ -193,38 +193,53 @@ class GvcwSiteDriver:
         click, and require a fresh signal — either a new grid, or the empty
         marker appearing after having been hidden."""
         await self._jq_set(SEL_DATEFROM, date_dmy)
-        # Baseline: what the page shows BEFORE this search fires.
-        before = await self.page.evaluate(
-            "() => { const m = document.querySelector('#resultMessage');"
-            " const g = document.querySelector('#result');"
-            " return { hasGrid: !!g, gridText: g ? g.innerText : '',"
-            "          msgShown: !!(m && !m.classList.contains('hidden')),"
-            "          msgText: m ? m.innerText : '' }; }"
-        ) or {}
-        await self.page.click(SEL_SEARCH)
-        # Fresh = a new grid appeared (or changed), or the empty marker
-        # (re)appeared/changed — leftovers from an earlier date never count.
-        fresh_js = (
-            "() => {"
-            " const g = document.querySelector('#result');"
-            " const m = document.querySelector('#resultMessage');"
-            " const msgShown = !!(m && !m.classList.contains('hidden'));"
-            " const gridText = g ? g.innerText : '';"
-            " const msgText = m ? m.innerText : '';"
-            f" const wasGrid = {str(bool(before.get('hasGrid'))).lower()};"
-            f" const wasMsg = {str(bool(before.get('msgShown'))).lower()};"
-            f" const oldGrid = {json.dumps(before.get('gridText') or '')};"
-            f" const oldMsg = {json.dumps(before.get('msgText') or '')};"
-            " return (g && (!wasGrid || gridText !== oldGrid))"
-            "      || (msgShown && (!wasMsg || msgText !== oldMsg));"
-            "}"
+        # Freshness proof = the search PUT itself: hook XHR loadend before
+        # the click, so a completed request is what we wait on — DOM races
+        # (instant clear→refill) can't fool it, and a stale #result from an
+        # earlier date never satisfies a new search. If the flag never
+        # flips, the click's validator/handler didn't fire the request.
+        await self.page.evaluate(
+            "() => { window.__gvcwSearchDone = false;"
+            " if (window.__gvcwHooked) return;"
+            " window.__gvcwHooked = true;"
+            " const orig = XMLHttpRequest.prototype.send;"
+            " XMLHttpRequest.prototype.send = function(...a){"
+            "   if ((this.__url||'').includes('periodslot'))"
+            "     this.addEventListener('loadend', () => {"
+            "       window.__gvcwSearchDone = true; });"
+            "   return orig.apply(this, a); };"
+            " const origOpen = XMLHttpRequest.prototype.open;"
+            " XMLHttpRequest.prototype.open = function(m, u, ...a){"
+            "   this.__url = u; return origOpen.call(this, m, u, ...a); };"
+            " const origFetch = window.fetch;"
+            " window.fetch = function(...a){"
+            "   const url = String(a[0] && a[0].url || a[0] || '');"
+            "   const p = origFetch.apply(this, a);"
+            "   if (url.includes('periodslot'))"
+            "     p.finally(() => { window.__gvcwSearchDone = true; });"
+            "   return p; }; }"
         )
+        await self.page.click(SEL_SEARCH)
         try:
-            await self.page.wait_for_function(fresh_js, timeout=15_000)
+            await self.page.wait_for_function(
+                "() => window.__gvcwSearchDone === true",
+                timeout=15_000,
+            )
         except PwTimeout:
             raise SiteNotConfigured(
-                f"search for {date_dmy} produced neither a fresh #result nor "
-                "a fresh #resultMessage — treating as a failed read, not zero slots"
+                f"search for {date_dmy}: no slot request completed "
+                "(click blocked — validator/handler issue), not zero slots"
+            )
+        # request finished — the markers are whatever it just rendered
+        markers = await self.page.evaluate(
+            "() => ({ grid: !!document.querySelector('#result'),"
+            " msgShown: !!(document.querySelector('#resultMessage') && "
+            "  !document.querySelector('#resultMessage').classList.contains('hidden'))})"
+        ) or {}
+        if not (markers.get("grid") or markers.get("msgShown")):
+            raise SiteNotConfigured(
+                f"search for {date_dmy} completed but rendered neither "
+                "#result nor #resultMessage — failed read, not zero slots"
             )
 
     async def list_slots(self) -> list[str]:

@@ -15,9 +15,10 @@ import secrets
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .bridge import HUB, BridgeClient, BridgeError, BridgeProtocolError
 from .localapp import LocalMonitor
 from .queue import ApplicantQueue
 
@@ -131,6 +132,27 @@ def create_app(queue: ApplicantQueue, monitor: LocalMonitor,
     def _401():
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
+    # ── extension bridge socket ──────────────────────────────────────────
+    # The bundled extension connects here: ws://127.0.0.1:PORT/bridge?token=T
+    # Each socket becomes a BridgeClient registered into the shared HUB —
+    # the monitor and API then reach the operator's selected tab through it.
+    @app.websocket("/bridge")
+    async def bridge_socket(websocket: WebSocket):
+        if websocket.query_params.get("token") != token:
+            await websocket.close(code=4401)
+            return
+        await websocket.accept()
+        client = BridgeClient(send_raw=websocket.send_text)
+        HUB.register(client)
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                await client.handle_message(json.loads(raw))
+        except Exception:
+            pass
+        finally:
+            HUB.unregister(client)
+
     @app.get("/")
     async def index():
         return HTMLResponse(DASH_HTML)
@@ -146,33 +168,40 @@ def create_app(queue: ApplicantQueue, monitor: LocalMonitor,
         if not authed(request):
             return _401()
         try:
-            tabs = await bridge_client.tabs()
+            client = bridge_client.client()
+            tabs = await client.tabs()
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=502)
         return JSONResponse({"tabs": [
-            {"tabId": t.get("tabId"), "url": t.get("url"), "title": t.get("title")}
+            {"tabId": t.get("tabId") or t.get("id"), "url": t.get("url"),
+             "title": t.get("title")}
             for t in tabs]})
 
     @app.post("/api/pair")
     async def pair(request: Request):
         if not authed(request):
             return _401()
-        body = await request.json()
-        tab_id = body.get("tab_id")
-        if not isinstance(tab_id, int):
-            return JSONResponse({"error": "tab_id required"}, status_code=400)
+        # The extension popup already selects the tab — pairing here just
+        # confirms the extension's current selection is a portal tab and
+        # starts driving it. We never ask the extension to switch tabs.
         try:
-            tabs = await bridge_client.tabs()
-        except Exception as exc:
-            return JSONResponse({"error": f"bridge unreachable: {exc}"},
-                                status_code=502)
-        tab = next((t for t in tabs if t.get("tabId") == tab_id), None)
-        if tab is None:
-            return JSONResponse({"ok": False, "error": "tab not found"})
-        url = tab.get("url", "")
-        if not url.startswith(allowed_origin):
+            client = bridge_client.client()
+        except Exception:
             return JSONResponse({"ok": False,
-                                 "error": f"tab is not on {allowed_origin}: {url}"})
+                                 "error": "no extension connected — load it in "
+                                 "Chrome and select the portal tab in its popup"})
+        try:
+            tab_id = client.current_tab()
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)})
+        try:
+            url = await client.evaluate("location.href", timeout=10) or ""
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)})
+        if not str(url).startswith(allowed_origin):
+            return JSONResponse({"ok": False,
+                                 "error": f"selected tab is not on "
+                                 f"{allowed_origin}: {url}"})
         monitor.pair(tab_id)
         return JSONResponse({"ok": True, "tab": {"tabId": tab_id, "url": url}})
 
@@ -278,7 +307,6 @@ def run() -> None:
 
     import uvicorn
 
-    from .cdp_bridge import BridgeClient as _BridgeClient
     from .config import load_config
 
     cfg = load_config()
@@ -287,16 +315,29 @@ def run() -> None:
     queue = ApplicantQueue(data_dir / "queue.db")
     allowed = getattr(cfg, "gvcw_origin",
                       "https://pk-gr-services.gvcworld.eu")
-    bridge_base = getattr(cfg, "cdp_bridge_base", "http://localhost:1232")
     token = issue_token(data_dir)
-    monitor = LocalMonitor(queue, bridge_base, allowed)
-    bridge = _BridgeClient(bridge_base)
-    app = create_app(queue, monitor, bridge, allowed, token)
-    port = int(getattr(cfg, "local_port", 8765))
+
+    async def page_factory():
+        # The bundled extension holds the WS socket into HUB and the
+        # operator picks the tab in its popup. If nothing is paired we have
+        # no page — the monitor waits in "awaiting_pair".
+        from .ws_page import WsPage
+        try:
+            client = HUB.client()
+        except Exception:
+            client = None
+        if client is None:
+            raise BridgeError(
+                "no extension tab connected — pair one in the extension popup")
+        return WsPage(client, [allowed], allow_writes=True)
+
+    monitor = LocalMonitor(queue, page_factory, allowed)
+    app = create_app(queue, monitor, HUB, allowed, token)
+    port = int(getattr(cfg, "local_port", 8080))
     url = f"http://127.0.0.1:{port}/?token={token}"
     print(f"Appointment Booker — local app")
     print(f"Dashboard: {url}")
-    print(f"Portal origin: {allowed} · bridge: {bridge_base}")
+    print(f"Portal origin: {allowed} · extension bridge: ws://127.0.0.1:{port}/bridge")
     try:
         webbrowser.open(url)
     except Exception:
