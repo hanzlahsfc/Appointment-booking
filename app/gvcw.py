@@ -21,6 +21,7 @@ missing markers raise SiteNotConfigured instead.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -185,20 +186,45 @@ class GvcwSiteDriver:
     async def _search(self, date_dmy: str) -> None:
         """Fill #datefrom and fire Search; wait until the portal shows either
         the result grid or the empty-state marker. Anything else is a failed
-        read — never silently zero."""
+        read — never silently zero.
+
+        Freshness: an old #result/#resultMessage from a previous date must
+        not satisfy a NEW search. We snapshot the marker state before the
+        click, and require a fresh signal — either a new grid, or the empty
+        marker appearing after having been hidden."""
         await self._jq_set(SEL_DATEFROM, date_dmy)
+        # Baseline: what the page shows BEFORE this search fires.
+        before = await self.page.evaluate(
+            "() => { const m = document.querySelector('#resultMessage');"
+            " const g = document.querySelector('#result');"
+            " return { hasGrid: !!g, gridText: g ? g.innerText : '',"
+            "          msgShown: !!(m && !m.classList.contains('hidden')),"
+            "          msgText: m ? m.innerText : '' }; }"
+        ) or {}
         await self.page.click(SEL_SEARCH)
+        # Fresh = a new grid appeared (or changed), or the empty marker
+        # (re)appeared/changed — leftovers from an earlier date never count.
+        fresh_js = (
+            "() => {"
+            " const g = document.querySelector('#result');"
+            " const m = document.querySelector('#resultMessage');"
+            " const msgShown = !!(m && !m.classList.contains('hidden'));"
+            " const gridText = g ? g.innerText : '';"
+            " const msgText = m ? m.innerText : '';"
+            f" const wasGrid = {str(bool(before.get('hasGrid'))).lower()};"
+            f" const wasMsg = {str(bool(before.get('msgShown'))).lower()};"
+            f" const oldGrid = {json.dumps(before.get('gridText') or '')};"
+            f" const oldMsg = {json.dumps(before.get('msgText') or '')};"
+            " return (g && (!wasGrid || gridText !== oldGrid))"
+            "      || (msgShown && (!wasMsg || msgText !== oldMsg));"
+            "}"
+        )
         try:
-            await self.page.wait_for_function(
-                "() => !!document.querySelector('#result') || "
-                "   (document.querySelector('#resultMessage') && "
-                "    !document.querySelector('#resultMessage').classList.contains('hidden'))",
-                timeout=15_000,
-            )
+            await self.page.wait_for_function(fresh_js, timeout=15_000)
         except PwTimeout:
             raise SiteNotConfigured(
-                f"search for {date_dmy} produced neither #result nor "
-                "#resultMessage — treating as a failed read, not zero slots"
+                f"search for {date_dmy} produced neither a fresh #result nor "
+                "a fresh #resultMessage — treating as a failed read, not zero slots"
             )
 
     async def list_slots(self) -> list[str]:

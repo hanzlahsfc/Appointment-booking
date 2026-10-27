@@ -49,3 +49,63 @@ Docs: docs/BRIDGE-RECON.md. Verified vs faithful mock over real HTTP
 transport (tests/test_bridge.py) — not yet run against live portal.
 `app/bridge.py` (the project's own WS bridge + legacy BridgeSiteDriver)
 is untouched and separate.
+
+## WINDOWS-APP MILESTONE (active task — resume here)
+
+Goal: client-installed Windows app — bundled Chrome extension + local
+Python server/dashboard + sequential applicant queue. Local-first only
+(no Vercel/tunnel/VPS/multi-client). Reuse existing pieces, do NOT build
+competing impls.
+
+Existing assets to build on:
+- `app/bridge.py` — project's own WS bridge (BridgeClient/BridgeHub,
+  current_tab(), evaluate/command, origin+token checks, tab claiming).
+  `site.py` has `BridgeSiteDriver` (legacy select-driver). tests/test_bridge.py = 29 tests.
+- `app/cdp_bridge.py` — NEW duck-typed Playwright page over devtools-extension
+  HTTP :1232 (explicit tab, per-op origin gate, session/challenge stops,
+  read-only default). Used by bridge-recon/bridge-monitor. tests/test_cdp_bridge.py.
+- `app/gvcw.py` — GvcwSiteDriver (search-driven real portal: #type/#datefrom/
+  #btn-search → PUT /api/v1/periodslot/slots → .appointment_slot grid).
+- `app/bridge_monitor.py`, `app/bridge_recon.py`, `python -m app.hosted
+  bridge-recon|bridge-monitor`.
+- `extension/` folder + `appointment-booker-extension.zip` (project bridge
+  extension — verify which transport it uses).
+- Hosted server/dashboard (app/hosted/*, client-dashboard/*) — reusable
+  UI primitives (alarm, bookings feed, input stream) but the new app is
+  SINGLE-CLIENT local; do NOT expose the bridge to the web page.
+
+Commits so far this task:
+- dc588ac restored 29 WS-bridge tests; my HTTP tests → test_cdp_bridge.py (31/31 pass)
+- ca2a6cc cdp_bridge fixes + bridge-monitor
+
+STILL TO DO (in order):
+1. Search freshness: gvcw._search must not accept a stale #result/#resultMessage
+   from a previous date — record pre-search marker state and require it to
+   CHANGE (or wait for the loader cycle to complete). Same for list_slots.
+2. Queue model: ordered applicants persisted in SQLite (add queue table;
+   states: queued/monitoring/selected-awaiting-human/submitting/booked/
+   failed/outcome-unknown; identity dedup WITHOUT storing raw passport).
+3. Local app server: pairing-auth localhost API + dashboard page
+   (queue CRUD, category/date-range config, start/pause/stop monitor,
+   current applicant/date/latency/last-check/errors, alarm with
+   Enable/Test/Acknowledge, OTP request+entry, Confirm-and-book).
+4. Extension pairing: bundled extension connects selected tab to
+   localhost (origin check, clear disconnect state, operator picks tab).
+   Prefer the existing WS bridge (app/bridge.py) over devtools-extension.
+5. Monitor loop per UX steps 7-11: detect→select→prefill→alarm→
+   manual OTP/captcha→Confirm-and-book→verify /result/{ref}→advance to
+   next applicant. Ambiguous submit → park queue for review, never retry.
+6. Windows package: SETUP.bat (venv, dep check, extension-load
+   instructions — no silent install claims), START.bat (port check,
+   no dup server, opens dashboard), CLIENT-README.md, packaging script
+   producing a ZIP excluding secrets/data/profiles/.git.
+7. Tests: sequential 2-applicant flow, restart persistence, stale search,
+   disabled/empty/malformed grids, lost slot, wrong OTP, captcha pending,
+   ambiguous submit, disconnect/wrong-origin, pairing auth — all on the
+   faithful mock. NO real OTP/booking.
+8. Verify centre display (account-bound, read-only) — never promise
+   "any centre".
+
+Real-portal state: live /add page verified via devtools-extension bridge
+(tab must be signed in). Search requires DOB+passport filled (validator);
+fill_applicant runs BEFORE _search. Centre = account-bound (vac=138).
