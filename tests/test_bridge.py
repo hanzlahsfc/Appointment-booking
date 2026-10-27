@@ -1,214 +1,507 @@
-"""BridgePage + bridge-recon against the faithful mock through the real
-HTTP transport: a fake bridge server exposing the extension's exact API
-(/health, /tabs, /command with Runtime.evaluate/Page.navigate/Input/
-Page.captureScreenshot) backed by a real Playwright page on the mock portal.
+"""Tests for the browser bridge: protocol validation, request correlation,
+tab targeting, exception surfacing, and the CDP calls our driver issues.
 
-Proves: read-only recon (selectors + one search), explicit-tab-only
-behavior, wrong-origin rejection, disconnect and session-loss stops — and
-that nothing mutating runs without allow_writes.
+A fake extension stands in for Chrome, so none of this needs a browser.
 """
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
-import sys
-import time
 from pathlib import Path
 
 import pytest
 
-pytest.importorskip("playwright")
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "tests"))
-
-from fake_portal.app import PortalState, create_app  # noqa: E402
-from test_hosted_e2e import _serve, _serve_in_loop  # noqa: E402
-
-from app.cdp_bridge import (  # noqa: E402
-    BridgeClient, BridgeDisconnected, BridgeNavRejected,
-    BridgeReadOnly, BridgeSessionLost,
+from app.bridge import (
+    MAX_FRAME_BYTES,
+    MAX_PENDING_REQUESTS,
+    PROTOCOL_VERSION,
+    BridgeClient,
+    BridgeError,
+    BridgeHub,
+    BridgeNotConnected,
+    BridgeProtocolError,
+    BridgeTimeout,
+    parse_frame,
+    token_matches,
+    validate_origin,
 )
-from app.bridge_recon import run_recon  # noqa: E402
-
-import httpx  # noqa: E402
-from fastapi import FastAPI, Request  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
-
-PORTAL_BASE = ""
-BRIDGE_BASE = ""
+from app.site import BookingSelectors, BridgeSiteDriver, SlotNotFound
 
 
-class FakeBridge:
-    """The extension's HTTP contract, backed by one Playwright page."""
+async def _noop(raw: str) -> None:
+    """A send that goes nowhere (the reply never arrives)."""
 
-    def __init__(self):
-        self.app = FastAPI()
-        self.tabs: dict[int, object] = {}   # tabId -> playwright Page
-        self.app.get("/health")(self._health)
-        self.app.get("/tabs")(self._tabs)
-        self.app.post("/command")(self._command)
 
-    async def _health(self):
-        return {"ok": True}
+class FakeExtension:
+    """Records what the server sends and replies the way Chrome would."""
 
-    async def _tabs(self):
-        return {"result": [
-            {"tabId": tid, "url": p.url, "title": await p.title()}
-            for tid, p in self.tabs.items()
-        ]}
+    def __init__(self, responder=None):
+        self.sent: list[dict] = []
+        self.client = BridgeClient(client_id="fake", send_raw=self._send)
+        self._responder = responder
 
-    async def _command(self, request: Request):
-        body = await request.json()
-        page = self.tabs.get(body["tabId"])
-        if page is None or page.is_closed():
-            return JSONResponse({"error": "Tab not attached"})
-        method, params = body["method"], body.get("params") or {}
+    async def _send(self, raw: str) -> None:
+        message = json.loads(raw)
+        self.sent.append(message)
+        if self._responder is None:
+            return
+        reply = {"id": message.get("id")}
+        reply.update(self._responder(message))
+        asyncio.ensure_future(self.client.handle_message(reply))
+
+    def ops(self) -> list[str]:
+        return [m.get("op") for m in self.sent]
+
+    def commands(self) -> list[tuple[str, dict]]:
+        return [
+            (m.get("method"), m.get("params", {}))
+            for m in self.sent
+            if m.get("op") == "command"
+        ]
+
+
+def responder_ok(value=True, ready_state: str = "complete"):
+    """Behave like the page: readyState resolves at once, everything else `value`."""
+
+    def responder(message):
+        if message.get("op") != "command":
+            return {"ok": True, "result": None}
+        expression = str(message.get("params", {}).get("expression", ""))
+        if "readyState" in expression:
+            return {"ok": True, "result": {"result": {"value": ready_state}}}
+        # the filter-application JS reports {found, applied}; emulate success
+        if "el.options" in expression:
+            return {"ok": True, "result": {"result": {"value": {"found": True, "applied": True}}}}
+        return {"ok": True, "result": {"result": {"value": value}}}
+
+    return responder
+
+
+# ── dependency guard (requirement 9) ────────────────────────────────────
+
+def test_a_websocket_implementation_is_installed():
+    """uvicorn needs websockets or wsproto, or /bridge never completes its
+    handshake. Plain `uvicorn` does not pull one in by default."""
+    available = [name for name in ("websockets", "wsproto") if importlib.util.find_spec(name)]
+    assert available, (
+        "no WebSocket implementation installed — `pip install websockets` "
+        "(it is listed in requirements.txt)"
+    )
+
+
+# ── frame + connection validation (requirement 6) ───────────────────────
+
+def test_frame_parsing_rejects_garbage():
+    with pytest.raises(BridgeProtocolError, match="not valid JSON"):
+        parse_frame("not json")
+    with pytest.raises(BridgeProtocolError, match="JSON object"):
+        parse_frame("[1, 2]")
+    with pytest.raises(BridgeProtocolError, match="must be text"):
+        parse_frame(b"{}")
+    with pytest.raises(BridgeProtocolError, match="exceeds"):
+        parse_frame("x" * (MAX_FRAME_BYTES + 1))
+
+
+def test_origin_must_be_the_extension_or_a_local_page():
+    assert validate_origin("chrome-extension://abcdef")[0] is True
+    assert validate_origin("http://127.0.0.1:8080")[0] is True
+    # a malicious web page in the same browser is exactly what this stops
+    assert validate_origin("https://evil.example")[0] is False
+    assert validate_origin(None)[0] is False
+
+
+def test_token_check_is_optional_but_strict_when_configured():
+    assert token_matches(None, None) is True
+    assert token_matches("anything", None) is True
+    assert token_matches("right", "right") is True
+    assert token_matches("wrong", "right") is False
+    assert token_matches(None, "right") is False
+
+
+def test_hello_protocol_mismatch_is_rejected():
+    async def scenario():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        await client.handle_message(
+            {"type": "hello", "protocol": 99, "version": "1.0.0", "tabId": None}
+        )
+
+    with pytest.raises(BridgeProtocolError, match="protocol"):
+        asyncio.run(scenario())
+
+
+def test_hello_sets_compatibility_protocol_and_tab():
+    async def scenario():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        await client.handle_message(
+            {"type": "hello", "protocol": PROTOCOL_VERSION, "version": "1.0.0", "tabId": 42}
+        )
+        return client.compatible, client.protocol, client.tab_id
+
+    assert asyncio.run(scenario()) == (True, PROTOCOL_VERSION, 42)
+
+
+def test_reply_shapes_are_validated():
+    async def bad_ok():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        await client.handle_message({"id": "r1", "ok": "yes"})
+
+    async def bad_id():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        await client.handle_message({"ok": True})
+
+    with pytest.raises(BridgeProtocolError, match="reply.ok"):
+        asyncio.run(bad_ok())
+    with pytest.raises(BridgeProtocolError, match="reply.id"):
+        asyncio.run(bad_id())
+
+
+# ── tab selection reaches the backend (requirement 2) ───────────────────
+
+def test_tab_changed_updates_the_client_and_notifies_observers():
+    async def scenario():
+        hub = BridgeHub()
+        events: list[tuple[str, dict]] = []
+        hub.add_observer(lambda name, payload: events.append((name, payload)))
+        client = hub.register(BridgeClient(client_id="c", send_raw=_noop))
+        await client.handle_message(
+            {"type": "hello", "protocol": PROTOCOL_VERSION, "tabId": None}
+        )
+
+        await client.handle_message({"type": "tabChanged", "tabId": 77})
+        return client.tab_id, hub.selected_tab(), events[-1]
+
+    tab_id, selected, event = asyncio.run(scenario())
+    assert tab_id == 77
+    assert selected == 77
+    assert event[0] == "tab_changed" and event[1]["tab_id"] == 77
+
+
+def test_tab_closed_clears_the_selection_on_the_server():
+    async def scenario():
+        hub = BridgeHub()
+        client = hub.register(BridgeClient(client_id="c", send_raw=_noop))
+        await client.handle_message({"type": "hello", "protocol": PROTOCOL_VERSION, "tabId": 5})
+        await client.handle_message({"type": "tabChanged", "tabId": None})
+        return client.tab_id, hub.selected_tab()
+
+    assert asyncio.run(scenario()) == (None, None)
+
+
+def test_tab_changed_rejects_a_non_integer():
+    async def scenario():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        await client.handle_message({"type": "tabChanged", "tabId": "77"})
+
+    with pytest.raises(BridgeProtocolError, match="tabChanged.tabId"):
+        asyncio.run(scenario())
+
+
+# ── request correlation and lifecycle ───────────────────────────────────
+
+def test_request_response_correlation():
+    async def scenario():
+        seen = []
+
+        async def send_raw(raw):
+            seen.append(json.loads(raw))
+
+        client = BridgeClient(client_id="c", send_raw=send_raw)
+        task = asyncio.create_task(client.request("tabs", timeout=2))
+        while not seen:
+            await asyncio.sleep(0.01)
+        await client.handle_message({"id": seen[0]["id"], "ok": True, "result": [{"tabId": 7}]})
+        return await task
+
+    assert asyncio.run(scenario()) == [{"tabId": 7}]
+
+
+def test_error_reply_raises_bridge_error():
+    async def scenario():
+        seen = []
+
+        async def send_raw(raw):
+            seen.append(json.loads(raw))
+
+        client = BridgeClient(client_id="c", send_raw=send_raw)
+        task = asyncio.create_task(client.request("command", timeout=2))
+        while not seen:
+            await asyncio.sleep(0.01)
+        await client.handle_message({"id": seen[0]["id"], "ok": False, "error": "Tab not attached"})
+        return await task
+
+    with pytest.raises(BridgeError, match="Tab not attached"):
+        asyncio.run(scenario())
+
+
+def test_timeout_is_reported_not_hung():
+    async def scenario():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        return await client.request("tabs", timeout=0.05)
+
+    with pytest.raises(BridgeTimeout):
+        asyncio.run(scenario())
+
+
+def test_disconnect_fails_in_flight_requests():
+    async def scenario():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        task = asyncio.create_task(client.request("tabs", timeout=5))
+        await asyncio.sleep(0.01)
+        client.close("extension went away")
+        return await task
+
+    with pytest.raises(BridgeNotConnected):
+        asyncio.run(scenario())
+
+
+def test_backpressure_refuses_work_beyond_the_limit():
+    async def scenario():
+        client = BridgeClient(client_id="c", send_raw=_noop)
+        tasks = [
+            asyncio.create_task(client.request("tabs", timeout=5))
+            for _ in range(MAX_PENDING_REQUESTS)
+        ]
+        await asyncio.sleep(0.05)
         try:
-            if method == "Runtime.evaluate":
-                value = await page.evaluate(
-                    params["expression"], params.get("arguments", [None])[0]
-                    if params.get("arguments") else None)
-                return {"result": {"result": {"type": "object", "value": value}}}
-            if method == "Page.navigate":
-                await page.goto(params["url"], wait_until="domcontentloaded")
-                return {"result": {"frameId": "x"}}
-            if method == "Input.dispatchMouseEvent":
-                await page.mouse.click(params["x"], params["y"])
-                return {"result": {}}
-            if method == "Page.captureScreenshot":
-                import base64
-                png = await page.screenshot()
-                return {"result": {"data": base64.b64encode(png).decode()}}
-            return JSONResponse({"error": f"unsupported {method}"})
-        except Exception as exc:
-            return {"result": {"exceptionDetails": {"text": str(exc)}}}
+            with pytest.raises(BridgeError, match="too many requests"):
+                await client.request("tabs", timeout=0.1)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
-@pytest.fixture(scope="module")
-def rig(tmp_path_factory):
-    """Fake portal + fake bridge + a signed-in page, all on loopback."""
-    from playwright.async_api import async_playwright
-
-    async def _build():
-        global PORTAL_BASE, BRIDGE_BASE
-        portal_state = PortalState()
-        portal_server, pport, _ = _serve(create_app(portal_state))
-        PORTAL_BASE = f"http://127.0.0.1:{pport}"
-        pw = await async_playwright().start()
-        browser = await pw.chromium.launch(headless=True)
-        bridge = FakeBridge()
-        # in-loop: bridge handlers await Playwright objects owned by this loop
-        bridge_server, bport, bridge_task = await _serve_in_loop(bridge.app)
-        BRIDGE_BASE = f"http://127.0.0.1:{bport}"
-        return (portal_state, portal_server, pw, browser, bridge,
-                bridge_server, bridge_task)
-
-    loop = asyncio.new_event_loop()
-    ctx = loop.run_until_complete(_build())
-    (portal_state, portal_server, pw, browser, bridge,
-     bridge_server, bridge_task) = ctx
-    yield portal_state, browser, bridge, loop
-    portal_server.should_exit = True
-    bridge_server.should_exit = True
-    bridge_task.cancel()
-    loop.run_until_complete(browser.close())
-    loop.run_until_complete(pw.stop())
-    loop.close()
+def test_hub_reports_when_nothing_is_attached():
+    hub = BridgeHub()
+    assert hub.connected is False
+    assert hub.selected_tab() is None
+    with pytest.raises(BridgeNotConnected, match="no browser extension connected"):
+        hub.client()
 
 
-async def _signed_page(browser, portal: PortalState, url: str):
-    ctx = await browser.new_context()
-    sid = "sid-test123"
-    portal.sessions[sid] = {"token": "t"}
-    await ctx.add_cookies([
-        {"name": "sid", "value": sid, "url": PORTAL_BASE, "httpOnly": True}])
-    page = await ctx.new_page()
-    await page.goto(url, wait_until="domcontentloaded")
-    return ctx, page
+def test_hub_tracks_register_unregister_and_snapshot():
+    async def scenario():
+        hub = BridgeHub()
+        events: list[str] = []
+        hub.add_observer(lambda name, payload: events.append(name))
+        client = hub.register(BridgeClient(client_id="c", send_raw=_noop))
+        await client.handle_message(
+            {"type": "hello", "protocol": PROTOCOL_VERSION, "version": "1.0.0", "tabId": 3}
+        )
+        snapshot = hub.snapshot()
+        hub.unregister(client)
+        return hub.connected, hub.client_count, snapshot[0]["tab_id"], events
+
+    connected, count, tab_id, events = asyncio.run(scenario())
+    assert (connected, count, tab_id) == (False, 0, 3)
+    assert events == ["connected", "disconnected"]
 
 
-def test_recon_full_and_guardrails(rig):
-    portal, browser, bridge, loop = rig
-    loop.run_until_complete(_recon_flow(portal, browser, bridge))
+# ── exceptionDetails (requirement 4) ────────────────────────────────────
+
+def test_evaluate_surfaces_exception_details_as_an_error():
+    """Runtime.evaluate reports page errors in exceptionDetails rather than
+    failing, so ignoring them made a throwing selector look like `undefined`."""
+
+    def responder(message):
+        return {
+            "ok": True,
+            "result": {
+                "result": {"type": "object"},
+                "exceptionDetails": {
+                    "text": "Uncaught",
+                    "exception": {"description": "TypeError: document.querySelector is null"},
+                },
+            },
+        }
+
+    fake = FakeExtension(responder=responder)
+    fake.client.tab_id = 1
+    with pytest.raises(BridgeError, match="TypeError: document.querySelector is null"):
+        asyncio.run(fake.client.evaluate("document.querySelector(null).click()"))
 
 
-async def _recon_flow(portal: PortalState, browser, bridge: FakeBridge) -> None:
-    portal.reset()
-    portal.add_gvcw_slot("30/11/2026", "09:00", category="26")
-    ctx, page = await _signed_page(browser, portal, f"{PORTAL_BASE}/appointments/add")
-    bridge.tabs[42] = page
-    try:
-        # wrong-tab / missing tab rejection first
-        report = await run_recon(999, PORTAL_BASE, bridge_base=BRIDGE_BASE)
-        assert report["ok"] is False and report["stage"] == "tab"
-        assert 42 in report["available"]
+def test_evaluate_rejects_a_reply_without_a_result_object():
+    def responder(message):
+        return {"ok": True, "result": {}}
 
-        # wrong-origin gate: allowlist mismatch must stop before any eval
-        from app.cdp_bridge import BridgeNavRejected as BNR
-        try:
-            await run_recon(42, "https://other.example", bridge_base=BRIDGE_BASE)
-            raise AssertionError("off-origin tab accepted")
-        except BNR:
-            pass
-
-        # happy path: selectors + one search, read-only
-        report = await run_recon(
-            42, PORTAL_BASE, category="26", target_date="30/11/2026",
-            bridge_base=BRIDGE_BASE)
-        assert report["ok"], report
-        assert all(report["checks"].values()), report["checks"]
-        assert report["bookable"], report
-        assert report["bookable"][0]["time"] == "09:00"
-        assert report["empty"] is False
-        # the seeded slot was found but nothing was booked/held
-        assert not portal.gvcw_bookings
-    finally:
-        del bridge.tabs[42]
-        await ctx.close()
+    fake = FakeExtension(responder=responder)
+    fake.client.tab_id = 1
+    with pytest.raises(BridgeProtocolError, match="no result object"):
+        asyncio.run(fake.client.evaluate("1"))
 
 
-def test_disconnect_and_session_loss(rig):
-    portal, browser, bridge, loop = rig
-    loop.run_until_complete(_disconnect_flow(portal, browser, bridge))
+def test_command_without_a_selected_tab_is_a_clear_error():
+    client = BridgeClient(client_id="c", send_raw=_noop)
+    with pytest.raises(BridgeNotConnected, match="no tab selected"):
+        asyncio.run(client.command("Runtime.evaluate", {"expression": "1"}))
 
 
-async def _disconnect_flow(portal: PortalState, browser, bridge: FakeBridge):
-    portal.reset()
-    ctx, page = await _signed_page(browser, portal, f"{PORTAL_BASE}/appointments/add")
-    bridge.tabs[7] = page
-    client = BridgeClient(BRIDGE_BASE)
-    try:
-        bp = await client.page(7, [PORTAL_BASE], allow_writes=True)
-        assert await bp.evaluate("document.title") != ""
+# ── driver behaviour (requirement 7) ────────────────────────────────────
 
-        # disconnect mid-life: tab vanishes -> next op must raise, not pick another
-        del bridge.tabs[7]
-        with pytest.raises(BridgeDisconnected):
-            await bp.evaluate("document.title")
-    finally:
-        bridge.tabs.pop(7, None)
-        await ctx.close()
+def _selectors() -> BookingSelectors:
+    return BookingSelectors(
+        vac_select="#vac",
+        category_select="#cat",
+        slot_row=".slot-row",
+        reserve_button="button.reserve",
+        applicant_fields={"passport": "#passport"},
+        submit_button="#submit",
+        confirmation_marker="#confirmation",
+    )
 
-    # session loss: page on the login form must stop recon
-    ctx2 = await browser.new_context()
-    login_page = await ctx2.new_page()
-    await login_page.goto(f"{PORTAL_BASE}/gvcw-login")
-    bridge.tabs[8] = login_page
-    try:
-        with pytest.raises(BridgeSessionLost):
-            await run_recon(8, PORTAL_BASE, bridge_base=BRIDGE_BASE)
-    finally:
-        del bridge.tabs[8]
-        await ctx2.close()
 
-    # read-only page refuses input
-    ctx3, page3 = await _signed_page(browser, portal, f"{PORTAL_BASE}/appointments/add")
-    bridge.tabs[9] = page3
-    try:
-        bp_ro = await client.page(9, [PORTAL_BASE])  # allow_writes=False
-        with pytest.raises(BridgeReadOnly):
-            await bp_ro.click("#btn-search")
-    finally:
-        del bridge.tabs[9]
-        await ctx3.close()
+def _driver(responder):
+    fake = FakeExtension(responder=responder)
+    fake.client.tab_id = 5
+    return BridgeSiteDriver(fake.client, _selectors()), fake
+
+
+def test_driver_follows_the_operators_tab_and_honours_a_pin():
+    async def scenario():
+        fake = FakeExtension(responder=responder_ok())
+        fake.client.tab_id = 5
+        following = BridgeSiteDriver(fake.client, _selectors())
+
+        await following.client.evaluate("1")
+        first = [m["tabId"] for m in fake.sent if m.get("op") == "command"][-1]
+
+        # the operator picks a different tab in the popup
+        await fake.client.handle_message({"type": "tabChanged", "tabId": 9})
+        await following.client.evaluate("1")
+        second = [m["tabId"] for m in fake.sent if m.get("op") == "command"][-1]
+
+        pinned = BridgeSiteDriver(fake.client, _selectors(), tab_id=11)
+        await pinned.client.evaluate("1", pinned.tab_id)
+        third = [m["tabId"] for m in fake.sent if m.get("op") == "command"][-1]
+        return first, second, third
+
+    assert asyncio.run(scenario()) == (5, 9, 11)
+
+
+def test_locate_reports_true_when_the_row_exists():
+    driver, fake = _driver(responder_ok(value=True))
+    found = asyncio.run(
+        driver.locate(
+            {"date": "2026-12-01", "time": "09:00", "location": "lahore",
+             "category": "national_d_employment"}
+        )
+    )
+    assert found is True
+    js = " ".join(str(p) for _, p in fake.commands())
+    assert "#vac" in js and "#cat" in js
+
+
+def test_reserve_dispatches_real_mouse_events():
+    driver, fake = _driver(responder_ok(value={"x": 120, "y": 240}))
+    asyncio.run(
+        driver.reserve(
+            {"date": "2026-12-01", "time": "09:00", "location": "lahore",
+             "category": "national_d_employment"}
+        )
+    )
+
+    kinds = [params.get("type") for method, params in fake.commands()
+             if method == "Input.dispatchMouseEvent"]
+    assert kinds == ["mouseMoved", "mousePressed", "mouseReleased"]
+    assert any("button.reserve" in str(params) for _, params in fake.commands())
+
+
+def test_reserve_raises_slot_gone_when_the_row_is_missing():
+    driver, _ = _driver(responder_ok(value=None))
+    with pytest.raises(SlotNotFound):
+        asyncio.run(
+            driver.reserve(
+                {"date": "2026-12-01", "time": "09:00", "location": "lahore",
+                 "category": "national_d_employment"}
+            )
+        )
+
+
+def test_driver_refuses_to_act_without_selectors():
+    fake = FakeExtension(responder=responder_ok())
+    fake.client.tab_id = 1
+    driver = BridgeSiteDriver(fake.client, BookingSelectors())
+    with pytest.raises(Exception, match="selectors are not configured"):
+        asyncio.run(
+            driver.locate({"date": "2026-12-01", "location": "lahore",
+                           "category": "national_d_employment"})
+        )
+
+
+def test_wait_for_waf_detects_the_block_shell():
+    def responder(message):
+        if message.get("op") == "command":
+            return {"ok": True, "result": {"result": {"value": "Access denied — Error 17"}}}
+        return {"ok": True, "result": {}}
+
+    driver, _ = _driver(responder)
+    with pytest.raises(Exception, match="block shell"):
+        asyncio.run(driver.wait_for_waf())
+
+
+def test_screenshot_decodes_base64(tmp_path: Path):
+    import base64
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+
+    def responder(message):
+        if message.get("method") == "Page.captureScreenshot":
+            return {"ok": True, "result": {"data": png}}
+        return {"ok": True, "result": {}}
+
+    driver, _ = _driver(responder)
+    target = tmp_path / "evidence.png"
+    asyncio.run(driver.screenshot(target))
+    assert target.read_bytes().startswith(b"\x89PNG")
+
+
+# ── wire protocol (requirement 1) ───────────────────────────────────────
+
+def test_command_sends_the_camel_case_tab_id_the_extension_reads():
+    """Regression: the extension reads `message.tabId`, so the wire field must be
+    `tabId`. Sending `tab_id` silently left every command with no target tab."""
+
+    async def scenario():
+        seen = []
+
+        async def send_raw(raw):
+            seen.append(json.loads(raw))
+
+        client = BridgeClient(client_id="c", send_raw=send_raw)
+        client.tab_id = 9
+        task = asyncio.create_task(client.command("Runtime.evaluate", {"expression": "1"}))
+        while not seen:
+            await asyncio.sleep(0.01)
+        await client.handle_message({"id": seen[0]["id"], "ok": True, "result": {}})
+        await task
+        return seen[0]
+
+    payload = asyncio.run(scenario())
+    assert payload["tabId"] == 9
+    assert "tab_id" not in payload
+    assert payload["method"] == "Runtime.evaluate"
+
+
+def test_network_sends_the_camel_case_tab_id():
+    async def scenario():
+        seen = []
+
+        async def send_raw(raw):
+            seen.append(json.loads(raw))
+
+        client = BridgeClient(client_id="c", send_raw=send_raw)
+        client.tab_id = 4
+        task = asyncio.create_task(client.network(limit=10))
+        while not seen:
+            await asyncio.sleep(0.01)
+        await client.handle_message({"id": seen[0]["id"], "ok": True, "result": {}})
+        await task
+        return seen[0]
+
+    payload = asyncio.run(scenario())
+    assert payload["tabId"] == 4
+    assert "tab_id" not in payload
