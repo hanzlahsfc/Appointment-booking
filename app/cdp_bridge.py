@@ -169,6 +169,11 @@ class BridgePage:
         return url
 
     async def _check_session(self) -> None:
+        # A plain reCAPTCHA iframe is NORMAL — the real /appointments/add
+        # form embeds one for final submission, so it must never flag a
+        # challenge. A genuine access-challenge page has Incapsula markers
+        # AND no booking form (#type/#datefrom/#btn-search). When a real
+        # challenge does appear we stop, we never solve or bypass it.
         res = await self._command(
             "Runtime.evaluate",
             {
@@ -180,8 +185,10 @@ class BridgePage:
                     "(document.body&&document.body.innerText"
                     ".includes('not verify that you are authorized')),"
                     "challenge: !!document.querySelector("
-                    "\"iframe[src*='recaptcha'],#incapsula,"
-                    "div#challenge-running\")})"
+                    "\"iframe[src*='Incapsula'],iframe[src*='incapsula'],"
+                    "#incapsula,#challenge-form,#challenge-running,"
+                    "div[class*='incapsula']\")"
+                    "&&!document.querySelector('#type,#datefrom,#btn-search')})"
                 ),
                 "returnByValue": True,
             },
@@ -208,6 +215,15 @@ class BridgePage:
             # Playwright semantics: the expression IS the function, called
             # with the arg — evaluate("sel => fn(sel)", value).
             params["expression"] = f"({expression})({json.dumps(arg)})"
+        else:
+            stripped = expression.lstrip()
+            # CDP evaluates a bare `() => ...` to a function OBJECT (returns
+            # undefined), while Playwright invokes it. Wrap function literals
+            # so callers written for Playwright behave the same here.
+            if ((stripped.startswith("(") or stripped.startswith("function")
+                    or stripped.startswith("async"))
+                    and not stripped.endswith("()")):
+                params["expression"] = f"({expression})()"
         res = await self._command("Runtime.evaluate", params) or {}
         inner = res.get("result") or res
         if res.get("exceptionDetails") or inner.get("exceptionDetails"):
@@ -254,8 +270,12 @@ class BridgePage:
     async def _trusted_click(self, selector: str) -> None:
         box = await self._eval(
             "(() => { const el = document.querySelector(ARG_SEL);"
-            " if(!el) return null; const r = el.getBoundingClientRect();"
-            " return {x: r.x + r.width/2, y: r.y + r.height/2}; })()".replace(
+            " if(!el) return null;"
+            " el.scrollIntoView({block:'center'});"
+            " const r = el.getBoundingClientRect();"
+            " if (!r.width && !r.height) return null;"
+            " return {x: Math.round(r.x + r.width/2),"
+            "         y: Math.round(r.y + r.height/2)}; })()".replace(
                 "ARG_SEL", repr(selector))
         )
         if not box:

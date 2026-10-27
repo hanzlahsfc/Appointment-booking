@@ -252,12 +252,18 @@ async def _cmd_bridge_recon(args) -> int:
         return 0
 
     cfg = load_config()
+    applicant = None
+    if args.applicant_file:
+        applicant = json.loads(
+            (cfg.data_dir / "applicants" / f"{args.applicant_file}.json")
+            .read_text())
     try:
         report = await run_recon(
             args.tab, args.origin,
             category=args.category,
             target_date=args.target_date,
             evidence_dir=cfg.data_dir / "recon",
+            applicant=applicant,
         )
     except BridgeError as exc:
         print(f"STOPPED: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -265,6 +271,42 @@ async def _cmd_bridge_recon(args) -> int:
 
     print(json.dumps(report, indent=2))
     return 0 if report.get("ok") else 1
+
+
+async def _cmd_bridge_monitor(args) -> int:
+    """Bounded read-only availability loop through the bridged tab."""
+    import json
+
+    from app.bridge_monitor import run_monitor
+    from app.cdp_bridge import BridgeError
+
+    cfg = load_config()
+    applicant = None
+    if args.applicant_file:
+        applicant = json.loads(
+            (cfg.data_dir / "applicants" / f"{args.applicant_file}.json")
+            .read_text())
+    say = lambda msg: print(msg, flush=True)
+    try:
+        stats = await run_monitor(
+            args.tab, args.origin,
+            category=args.category,
+            scan_days=args.scan_days,
+            interval=args.interval,
+            cycles=args.cycles,
+            applicant=applicant,
+            evidence_dir=cfg.data_dir / "recon",
+            report=say,
+        )
+    except BridgeError as exc:
+        print(f"STOPPED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "cycles": stats["cycles"], "searches": stats["searches"],
+        "dates": stats["dates"], "bookable": stats["bookable_total"],
+        "errors": stats["errors"],
+    }, indent=2))
+    return 0
 
 
 # ── serve ────────────────────────────────────────────────────────────────
@@ -469,6 +511,20 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="DD/MM/YYYY — run ONE real availability search for it")
     br.add_argument("--list-tabs", action="store_true",
                     help="list bridge tabs and exit")
+    br.add_argument("--applicant-file", default=None,
+                    help="data/applicants/<name>.json — needed: search validates fields")
+
+    bm = sub.add_parser(
+        "bridge-monitor",
+        help="BOUNDED read-only availability loop through your Chrome tab")
+    bm.add_argument("--tab", type=int, required=True)
+    bm.add_argument("--origin", required=True)
+    bm.add_argument("--category", default="26")
+    bm.add_argument("--scan-days", type=int, default=5)
+    bm.add_argument("--interval", type=int, default=90)
+    bm.add_argument("--cycles", type=int, default=6)
+    bm.add_argument("--applicant-file", default=None,
+                    help="data/applicants/<name>.json — required by the portal")
     return p
 
 
@@ -502,6 +558,8 @@ def main() -> int:
         return _cmd_set_applicant(args)
     if args.cmd == "bridge-recon":
         return asyncio.run(_cmd_bridge_recon(args))
+    if args.cmd == "bridge-monitor":
+        return asyncio.run(_cmd_bridge_monitor(args))
     return 2
 
 

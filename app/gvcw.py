@@ -162,11 +162,24 @@ class GvcwSiteDriver:
         await self._jq_set(SEL_TYPE, category)
         bookingfor = str(self.client.get("bookingfor", "0"))
         await self._jq_set(SEL_BOOKINGFOR, bookingfor)
+        # setPeriodslot() refuses to run while #members is empty. For
+        # Individual the select only carries group sizes (2..N) — the value
+        # '1' has no option, so it must be injected before it can be set.
+        members = str(self.client.get("members", "1"))
+        await self.page.evaluate(
+            "([sel, v]) => { const el = document.querySelector(sel);"
+            " if (!el) return false;"
+            " if (![...el.options].some(o => o.value === v)) {"
+            "   const o = document.createElement('option');"
+            "   o.value = v; o.text = v; el.add(o); }"
+            " el.value = v; el.dispatchEvent(new Event('change',{bubbles:true}));"
+            " if (window.jQuery) jQuery(sel).val(v).trigger('change');"
+            " return el.value === v; }",
+            [SEL_MEMBERS, members],
+        )
         if bookingfor == "0":
             await self._jq_set(SEL_METHOD, "1")
         else:
-            members = str(self.client.get("members", "1"))
-            await self._jq_set(SEL_MEMBERS, members)
             await self._jq_set(SEL_METHOD, str(self.client.get("method", "1")))
 
     async def _search(self, date_dmy: str) -> None:

@@ -71,6 +71,7 @@ async def run_recon(
     target_date: str | None = None,   # DD/MM/YYYY — required for a search
     bridge_base: str = "http://localhost:1232",
     evidence_dir: Path | None = None,
+    applicant: dict | None = None,
 ) -> dict:
     """Read-only verification. Returns a report dict; raises Bridge* errors."""
     client = BridgeClient(bridge_base)
@@ -123,6 +124,14 @@ async def run_recon(
         report["note"] = "no target date — selectors verified, search skipped"
         return report
 
+    # Search-time validation needs applicant fields — the portal refuses to
+    # query until the parsley-required gp_* fields are filled. Prefill from
+    # the operator's private local file when provided.
+    if applicant:
+        try:
+            await driver.fill_applicant(applicant)
+        except Exception as exc:
+            report["prefill_error"] = str(exc)
     await driver.apply_filters(None, category)
     await driver._search(target_date)
     slots = await page.evaluate(
