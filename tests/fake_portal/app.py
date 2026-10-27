@@ -132,6 +132,21 @@ def create_app(state: PortalState | None = None) -> FastAPI:
         response.set_cookie("sid", sid, httponly=True)
         return response
 
+    @app.get("/gvcw-login", response_class=HTMLResponse)
+    async def gvcw_login_page() -> HTMLResponse:
+        """Real-portal-shaped login (the real form uses #username/#password/
+        #btn-login, not the legacy Drupal ids)."""
+        return _page(
+            "Sign in to GVCW (Enter Username or E-mail &amp; Password)",
+            '<form method="post" action="/login">'
+            '<input id="username" name="name" type="text">'
+            '<input id="password" name="pass" type="password">'
+            '<input id="destination" type="hidden" value="/appointments/add">'
+            '<button type="button" id="btn-login" '
+            "onclick=\"this.form.method='post';this.form.submit()\">Sign in</button>"
+            "</form>",
+        )
+
     @app.get("/en/account", response_class=HTMLResponse)
     async def account(request: Request) -> HTMLResponse:
         if not _session(request):

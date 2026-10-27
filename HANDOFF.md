@@ -33,3 +33,19 @@ Read [project context](docs/PROJECT-CONTEXT.md) and [startup guide](docs/AGENT-S
 Do not guess selectors, bypass portal controls, clear unknown reservations blindly, or treat blocked reads as no appointments. Do not commit access codes or runtime data.
 
 Historical handoff is retained at [docs/archive/HANDOFF-2026-10-26.md](docs/archive/HANDOFF-2026-10-26.md); commands and test counts there may be stale.
+
+## Bridge recon (operator channel into the signed-in session)
+
+`app/cdp_bridge.py` adds a safety-gated `BridgePage` over the devtools-
+extension HTTP bridge (:1232) — the duck-typed subset `GvcwSiteDriver`
+needs, driving YOUR authenticated tab. Hard rules: one explicit tab id
+verified before every op, URL origin allowlist enforced continuously,
+BridgeSessionLost on login form/401, BridgeChallenge on captcha,
+BridgeDisconnected when the tab/host dies, read-only unless allow_writes.
+
+`python -m app.hosted bridge-recon --tab N --origin ORIGIN [--category 26 --target-date DD/MM/YYYY]`
+= selector assertions + ONE real Search + redacted evidence in data/recon/.
+Docs: docs/BRIDGE-RECON.md. Verified vs faithful mock over real HTTP
+transport (tests/test_bridge.py) — not yet run against live portal.
+`app/bridge.py` (the project's own WS bridge + legacy BridgeSiteDriver)
+is untouched and separate.

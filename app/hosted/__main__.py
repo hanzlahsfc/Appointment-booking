@@ -234,6 +234,39 @@ def _cmd_set_applicant(args) -> int:
         store.close()
 
 
+async def _cmd_bridge_recon(args) -> int:
+    """Read-only live check through the operator's Chrome tab."""
+    import json
+
+    from app.cdp_bridge import BridgeClient, BridgeError
+    from app.bridge_recon import run_recon
+
+    client = BridgeClient()
+    if args.list_tabs:
+        try:
+            for t in await client.tabs():
+                print(f"{t['tabId']:>10}  {t.get('url','')[:90]}")
+        except BridgeError as exc:
+            print(f"bridge unreachable: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    cfg = load_config()
+    try:
+        report = await run_recon(
+            args.tab, args.origin,
+            category=args.category,
+            target_date=args.target_date,
+            evidence_dir=cfg.data_dir / "recon",
+        )
+    except BridgeError as exc:
+        print(f"STOPPED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    print(json.dumps(report, indent=2))
+    return 0 if report.get("ok") else 1
+
+
 # ── serve ────────────────────────────────────────────────────────────────
 
 
@@ -423,6 +456,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="copy a private applicant JSON into data/applicants/ and attach it")
     ap.add_argument("username")
     ap.add_argument("--file", required=True, help="path to applicant JSON (PII — never committed)")
+
+    br = sub.add_parser(
+        "bridge-recon",
+        help="READ-ONLY: verify the live portal through your signed-in Chrome tab")
+    br.add_argument("--tab", type=int, required=True,
+                    help="explicit CDP-bridge tab id (see --list-tabs)")
+    br.add_argument("--origin", required=True,
+                    help="expected tab origin, e.g. https://pk-gr-services.gvcworld.eu")
+    br.add_argument("--category", default="26", help="#type option value (26=seasonal)")
+    br.add_argument("--target-date", default=None,
+                    help="DD/MM/YYYY — run ONE real availability search for it")
+    br.add_argument("--list-tabs", action="store_true",
+                    help="list bridge tabs and exit")
     return p
 
 
@@ -454,6 +500,8 @@ def main() -> int:
         return _cmd_seed_gvcw(args)
     if args.cmd == "set-applicant":
         return _cmd_set_applicant(args)
+    if args.cmd == "bridge-recon":
+        return asyncio.run(_cmd_bridge_recon(args))
     return 2
 
 
