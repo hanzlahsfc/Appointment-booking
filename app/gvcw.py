@@ -124,7 +124,23 @@ class GvcwSiteDriver:
             )
 
     async def is_login_page(self) -> bool:
-        return "/login" in self.page.url
+        """A lapsed session shows the login form at ANY url (the real portal
+        can also answer /appointments/add with a bare 401 page), so check the
+        DOM (#username/#password/#btn-login), not just the URL."""
+        if "/login" in self.page.url:
+            return True
+        try:
+            return bool(
+                await self.page.evaluate(
+                    "() => (document.querySelector('#username') &&"
+                    "       document.querySelector('#password')) ||"
+                    "      document.title.startsWith('401') ||"
+                    "      (document.body && document.body.innerText.includes("
+                    "          'not verify that you are authorized'))"
+                )
+            )
+        except Exception:
+            return False
 
     # ── search / detection ───────────────────────────────────────────────
 
