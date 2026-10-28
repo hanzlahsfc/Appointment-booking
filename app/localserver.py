@@ -59,19 +59,16 @@ table{width:100%;border-collapse:collapse}td,th{padding:4px 6px;border-bottom:1p
 <div class="muted">1. In the extension popup: paste this token → Connect →
  select the portal tab. 2. Then press Pair here.</div>
 <div class="muted">extension token: <code id="xtoken" style="user-select:all"></code></div>
-<input id="tabid" placeholder="tab id (e.g. 413653551)"><button onclick="pair()">Pair</button>
+<button onclick="pair()">Pair</button>
 <div id="pair-status" class="muted"></div></div>
 <div class="card"><h2>Monitor config</h2>
 Category <select id="cat"><option value="26">Seasonal/Dependent Employment (26)</option><option value="2">National visa D (2)</option></select>
-From <input id="df" placeholder="DD/MM/YYYY"> To <input id="dt" placeholder="DD/MM/YYYY">
-<div class="muted">Centre is fixed by the portal account — shown on the page, never set here.</div></div>
+<div class="muted">Scans every date in the next ~2 months automatically. Centre is fixed by the portal account — shown on the page, never set here.</div></div>
 <div class="card"><h2>Applicant queue</h2>
 <div id="newapp">
-<input id="an" placeholder="Full name (label)">
 <input id="as" placeholder="surname"><input id="af" placeholder="firstname">
 <input id="ad" placeholder="DOB DD/MM/YYYY"><input id="ap" placeholder="passport">
 <input id="av" placeholder="doc valid until DD/MM/YYYY">
-<input id="ae" placeholder="email"><input id="ah" placeholder="phone">
 <button onclick="addApp()">Add</button></div>
 <table><tr><th>#</th><th>name</th><th>status</th><th>note</th><th></th></tr>
 <tbody id="q"></tbody></table></div>
@@ -111,9 +108,9 @@ async function refresh(){
  const f=document.getElementById('feed');f.innerHTML=(d.feed&&d.feed.events||[]).map(e=>'<div>'+new Date(e.ts*1000).toLocaleTimeString()+' — '+esc(e.status)+(e.error?' · '+esc(e.error):'')+(e.date?' · '+e.date:'')+'</div>').join('');
 }
 function esc(s){return (s||'').toString().replace(/[<>&]/g,'');}
-async function pair(){const t=document.getElementById('tabid').value.trim();const r=await api('/api/pair',{method:'POST',body:JSON.stringify({tab_id:+t})});const d=await r.json();document.getElementById('pair-status').textContent=d.ok?'paired ✓':('failed: '+(d.error||''));}
+async function pair(){const r=await api('/api/pair',{method:'POST',body:JSON.stringify({})});const d=await r.json();document.getElementById('pair-status').textContent=d.ok?'paired ✓':('failed: '+(d.error||''));}
 async function ctl(a){await api('/api/monitor/'+a,{method:'POST'});refresh();}
-async function addApp(){const data={surname:as.value,firstname:af.value,dateofbirth:ad.value,passportnumber:ap.value,traveldocumentvaliduntil:av.value,email:ae.value,phonenumber:ah.value};const r=await api('/api/applicants',{method:'POST',body:JSON.stringify({display_name:an.value||as.value+' '+af.value,data:data,category:document.getElementById('cat').value,date_from:df.value,date_to:dt.value})});const d=await r.json();if(d.error)banner(d.error,'err');else banner('');refresh();}
+async function addApp(){const data={surname:as.value,firstname:af.value,dateofbirth:ad.value,passportnumber:ap.value,traveldocumentvaliduntil:av.value};const r=await api('/api/applicants',{method:'POST',body:JSON.stringify({display_name:(as.value+' '+af.value).trim(),data:data,category:document.getElementById('cat').value})});const d=await r.json();if(d.error)banner(d.error,'err');else banner('');refresh();}
 async function mv(i,dir){await api('/api/applicants/'+i+'/move',{method:'POST',body:JSON.stringify({direction:dir})});refresh();}
 async function del(i){await api('/api/applicants/'+i,{method:'DELETE'});refresh();}
 async function otpReq(){const r=await api('/api/booking/otp-request',{method:'POST'});const d=await r.json();banner(d.ok?'OTP requested — check your phone':d.error,'warn');}

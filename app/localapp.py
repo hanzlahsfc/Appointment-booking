@@ -29,7 +29,7 @@ def _dmy(d: date) -> str:
 
 
 def _daterange(date_from: str | None, date_to: str | None,
-               default_days: int = 14) -> list[str]:
+               default_days: int = 62) -> list[str]:   # ~2 months
     def parse(s):
         from datetime import datetime
         try:
