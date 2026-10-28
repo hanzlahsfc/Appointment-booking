@@ -6,13 +6,117 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+    _HAVE_YAML = True
+except ImportError:                       # e.g. no wheel for new Python
+    yaml = None
+    _HAVE_YAML = False
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 VALID_DRIVERS = ("bridge", "playwright")
+
+
+def _mini_load(text: str) -> dict:
+    """Tiny YAML-subset parser for our own config.yaml when PyYAML is absent
+    (e.g. Python too new for a wheel). Handles: nested dicts by indentation,
+    lists of scalars, lists of dicts, quoted/bool/int/float scalars, and
+    comments. NOT a general YAML parser — enough for this file's shape."""
+    def scalar(v: str):
+        v = v.strip()
+        if not v:
+            return ""
+        if v[0] in "\"'" and v[-1] == v[0]:
+            return v[1:-1]
+        if v.startswith("[") and v.endswith("]"):
+            return [scalar(x) for x in v[1:-1].split(",") if x.strip()]
+        low = v.lower()
+        if low in ("true", "yes"):
+            return True
+        if low in ("false", "no"):
+            return False
+        if low in ("null", "none", "~"):
+            return None
+        for fn in (int, float):
+            try:
+                return fn(v)
+            except ValueError:
+                pass
+        return v
+
+    def strip_comment(line: str) -> str:
+        out, inq = [], ""
+        for ch in line:
+            if ch in "\"'":
+                inq = "" if inq == ch else (inq or ch)
+            if ch == "#" and not inq:
+                break
+            out.append(ch)
+        return "".join(out).rstrip()
+
+    lines = []
+    for raw in text.splitlines():
+        ln = strip_comment(raw)
+        if ln.strip():
+            lines.append(ln)
+
+    def indent_of(s: str) -> int:
+        return len(s) - len(s.lstrip())
+
+    def parse_block(i: int, ind: int):
+        obj: Any = {}
+        lst: list | None = None
+        while i < len(lines):
+            ln = lines[i]
+            if indent_of(ln) < ind:
+                break
+            s = ln.strip()
+            if s.startswith("- "):
+                if lst is None:
+                    lst = []
+                    obj = lst
+                rest = s[2:].strip()
+                if ":" in rest and not rest.startswith(("\"", "'")):
+                    k, _, v = rest.partition(":")
+                    d = {k.strip(): scalar(v)}
+                    # continuation keys of this list item
+                    i += 1
+                    while i < len(lines) and not lines[i].strip().startswith("- ") \
+                            and indent_of(lines[i]) >= ind + 2:
+                        sk = lines[i].strip()
+                        if ":" in sk:
+                            kk, _, vv = sk.partition(":")
+                            d[kk.strip()] = scalar(vv)
+                        i += 1
+                    lst.append(d)
+                    continue
+                lst.append(scalar(rest))
+                i += 1
+                continue
+            if ":" in s:
+                k, _, v = s.partition(":")
+                key = k.strip()
+                if v.strip():
+                    obj[key] = scalar(v)
+                else:
+                    i += 1
+                    child, i = parse_block(i, ind + 2)
+                    obj[key] = child
+                    continue
+            i += 1
+        return obj, i
+
+    result, _ = parse_block(0, 0)
+    return result if isinstance(result, dict) else {}
+
+
+def _load_yaml(text: str) -> dict:
+    if _HAVE_YAML:
+        return yaml.safe_load(text) or {}
+    return _mini_load(text)
 
 
 @dataclass
@@ -211,7 +315,7 @@ def _parse_hosted(raw: dict[str, Any], root: Path) -> HostedConfig:
 def load_config(path: str | Path | None = None) -> Config:
     load_dotenv(ROOT / ".env")
     cfg_path = Path(path) if path else ROOT / "config.yaml"
-    raw = yaml.safe_load(cfg_path.read_text()) or {}
+    raw = _load_yaml(cfg_path.read_text()) if cfg_path.exists() else {}
 
     app_raw = raw.get("app", {}) or {}
     notif_raw = raw.get("notifications", {}) or {}
