@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from playwright.async_api import Page
+try:
+    from playwright.async_api import Page
+except ImportError:
+    from typing import Any as Page          # annotations only (from __future__)
 
 from .bridge import BridgeClient, BridgeError, BridgeNotConnected
 from .browser import IncapsulaHandler, WAFBlocked

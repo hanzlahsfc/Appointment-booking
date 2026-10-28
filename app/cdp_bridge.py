@@ -36,7 +36,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from playwright.async_api import TimeoutError as PwTimeout  # duck-type compat
+
+try:
+    from playwright.async_api import TimeoutError as PwTimeout
+except ImportError:                        # playwright not installed —
+    class PwTimeout(Exception):            # extension path doesn't need it
+        pass
 
 logger = logging.getLogger(__name__)
 

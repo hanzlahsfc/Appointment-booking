@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.async_api import TimeoutError as PwTimeout
+try:
+    from playwright.async_api import TimeoutError as PwTimeout
+except ImportError:                        # playwright not installed —
+    class PwTimeout(Exception):            # WS-extension path doesn't need it
+        pass
 
 from .bridge import BridgeClient, BridgeError, BridgeTimeout
 

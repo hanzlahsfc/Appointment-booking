@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 echo === Appointment Booker - SETUP ===
 echo.
@@ -18,7 +18,6 @@ if not defined PY (
   echo [FAIL] Python 3.11+ was not found.
   echo   Install it from https://www.python.org/downloads/
   echo   Tick "Add python.exe to PATH" during install - no admin needed.
-  echo   Then run SETUP.bat again.
   pause
   exit /b 1
 )
@@ -26,8 +25,7 @@ echo Using: %PY%
 
 %PY% -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" >nul 2>nul
 if not %errorlevel%==0 (
-  echo [FAIL] Your Python is older than 3.11. Install a newer one from
-  echo   https://www.python.org/downloads/ and re-run SETUP.bat.
+  echo [FAIL] Your Python is older than 3.11 - install a newer one and re-run.
   pause
   exit /b 1
 )
@@ -43,21 +41,30 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set "VENV=.venv\Scripts\python.exe"
 
-echo Installing dependencies (this can take a minute) ...
-"%VENV%" -m pip install --upgrade pip >nul 2>&1
-if not %errorlevel%==0 (
-  echo [FAIL] pip upgrade failed.
-  pause
-  exit /b 1
-)
+:: Bundled wheels target CPython 3.15 on Windows x64 ONLY - anything else
+:: needs a matching set or internet. Verify before claiming offline works.
+set "USE_WHEELS=0"
 if exist "wheels\" (
-  echo Using bundled wheels (no internet needed) ...
+  "%VENV%" -c "import sys;sys.exit(0 if (sys.version_info[:2]==(3,15) and sys.maxsize>2**32) else 1)" >nul 2>nul
+  if !errorlevel!==0 (
+    set "USE_WHEELS=1"
+  ) else (
+    echo [warn] Bundled wheels are CPython 3.15/x64 - your Python differs;
+    echo   falling back to online install. Run DIAGNOSE.bat if this fails.
+  )
+)
+
+echo Installing dependencies (this can take a minute) ...
+if "%USE_WHEELS%"=="1" (
+  echo Using bundled wheels - no internet needed.
   "%VENV%" -m pip install --no-index --find-links wheels -r requirements.txt
 ) else (
+  "%VENV%" -m pip install --upgrade pip >nul 2>&1
   "%VENV%" -m pip install -r requirements.txt
 )
-if not %errorlevel%==0 (
-  echo [FAIL] Dependency install failed - check your internet connection.
+set "RC=%errorlevel%"
+if not "%RC%"=="0" (
+  echo [FAIL] Dependency install failed - see the messages above.
   pause
   exit /b 1
 )

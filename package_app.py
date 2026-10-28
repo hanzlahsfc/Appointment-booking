@@ -30,7 +30,8 @@ EXCLUDE_PARTS = {
     "dist", "node_modules", "recon", "captures",
 }
 EXCLUDE_SUFFIXES = {".pyc", ".db", ".sqlite", ".sqlite3", ".log", ".png",
-                    ".zip", ".tar", ".gz", ".pem", ".key", ".env"}
+                    ".zip", ".tar", ".gz", ".pem", ".key", ".env",
+                    ".exe", ".dll", ".lnk"}
 
 
 def _skip(path: Path) -> bool:
@@ -41,6 +42,8 @@ def _skip(path: Path) -> bool:
         return True
     name = path.name.lower()
     if name.startswith(".env") or "secret" in name or "applicant" in name:
+        return True
+    if name in {"diagnose-log.txt", "app-token", "queue.db", "nul"}:
         return True
     return False
 

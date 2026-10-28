@@ -27,7 +27,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Page, TimeoutError as PwTimeout
+try:
+    from playwright.async_api import Page, TimeoutError as PwTimeout
+except ImportError:
+    from typing import Any as Page          # annotations only (from __future__)
+    class PwTimeout(Exception):
+        pass
 
 from .site import BookingSelectors, SiteNotConfigured, SlotNotFound
 
