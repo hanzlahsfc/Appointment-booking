@@ -108,6 +108,9 @@ def test_sequential_booking_and_restart(rig):
             assert out["ok"], out
             assert out["confirmation_ref"].startswith("GVCW-")
             assert queue.get(a1["id"])["status"] == "booked"
+            # verified success navigates the SAME page back to the form —
+            # not a fresh context — so the next applicant continues on it
+            assert page.url.endswith("/appointments/add"), page.url
 
             # applicant 2 becomes current — sequential advance
             a2 = queue.current()

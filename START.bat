@@ -9,11 +9,16 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set "VENV=.venv\Scripts\python.exe"
 
-:: Is a server already running on the port? If so, just open the dashboard.
-powershell -NoProfile -Command "$r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8765/' -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 }" >nul 2>&1
+:: Is THIS app already running on :8080? Check the page title, not just
+:: any HTTP 200 (another service could be on the port).
+powershell -NoProfile -Command ^
+  "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8080/' -TimeoutSec 2; if ($r.Content -match 'Appointment Booker') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
 if %errorlevel%==0 (
-  echo A server is already running — opening the dashboard.
-  start "" "http://127.0.0.1:8765/"
+  echo Appointment Booker is already running — opening the dashboard.
+  :: open the TOKEN'd URL so the dashboard is signed in on repeat start
+  set "TOKEN="
+  if exist "data\app-token" (set /p TOKEN=<"data\app-token")
+  if defined TOKEN (start "" "http://127.0.0.1:8080/?token=%TOKEN%") else start "" "http://127.0.0.1:8080/"
   exit /b 0
 )
 

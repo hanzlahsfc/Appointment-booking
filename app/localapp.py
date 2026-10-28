@@ -54,6 +54,7 @@ class LocalMonitor:
         self.tab_id: int | None = None      # set at pair time
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._ops_lock = asyncio.Lock()     # searches vs human actions
         self.paused = False
         self.feed: dict = {"status": "idle", "events": [],
                            "stats": {"cycles": 0, "searches": 0,
@@ -96,7 +97,8 @@ class LocalMonitor:
             if applicant["status"] == "queued":
                 self.queue.set_status(applicant["id"], "monitoring")
             if applicant["status"] in (
-                    "selected_awaiting_human", "outcome_unknown"):
+                    "selected_awaiting_human", "submitting",
+                    "outcome_unknown"):
                 self._say(applicant["status"], applicant_id=applicant["id"],
                           note="held — finish by hand or resolve")
                 await self._sleep(self.interval)
@@ -120,111 +122,134 @@ class LocalMonitor:
             pass
 
     async def _cycle(self, applicant: dict) -> None:
-        page = await self.page_factory()
-        driver = GvcwSiteDriver(page, {"bookingfor": "0", "method": "1"})
-
-        category = applicant.get("category") or self.category
-        dates = _daterange(applicant.get("date_from"),
-                           applicant.get("date_to"))
-        self._say("monitoring", applicant_id=applicant["id"], dates=dates)
-
+        # Whole scan under _ops_lock — page operations never race a human
+        # OTP/confirm. `paused` is also checked between dates so a pause
+        # stops NEW searches without tearing a held form.
         found = None
-        for dmy in dates:
-            t0 = time.perf_counter()
-            if applicant.get("data"):
-                try:
-                    await driver.fill_applicant(applicant["data"])
-                except Exception:
-                    logger.warning("prefill failed", exc_info=True)
-            await driver.apply_filters(None, category)
-            try:
-                await driver._search(dmy)
-            except SiteNotConfigured as exc:
-                self._say("search_error", date=dmy, error=str(exc))
-                continue
-            grid = await driver._read_grid(dmy)
-            self.feed["stats"]["searches"] += 1
-            self.feed["stats"]["latency_ms"] = round(
-                (time.perf_counter() - t0) * 1000)
-            self.feed["stats"]["last_check"] = time.time()
-            if grid:
-                found = {"date": dmy, "time": grid[0].split()[-1]}
-                break
-        if not found:
-            self._say("monitoring", applicant_id=applicant["id"],
-                      state={"bookable": 0, "dates": dates})
-            await self._sleep(self.interval)
-            return
+        async with self._ops_lock:
+            page = await self.page_factory()
+            driver = GvcwSiteDriver(page, {"bookingfor": "0", "method": "1"})
+            category = applicant.get("category") or self.category
+            dates = _daterange(applicant.get("date_from"),
+                               applicant.get("date_to"))
+            self._say("monitoring", applicant_id=applicant["id"], dates=dates)
 
-        # ── a bookable slot: select it, prefill, alarm, hand off ────────
-        slot = {"date": found["date"], "time": found["time"],
-                "category": category}
-        try:
-            ok = await driver.locate({"date": found["date"],
-                                      "time": found["time"]})
-            if not ok:
-                raise SlotNotFound("slot vanished before selection")
-            await driver.reserve({"date": found["date"],
-                                  "time": found["time"]})
-        except (SlotNotFound, Exception) as exc:
-            self._say("select_error", error=str(exc), slot=slot)
-            return
-        if applicant.get("data"):
-            try:
-                await driver.fill_applicant(applicant["data"])
-            except Exception:
-                logger.warning("prefill failed", exc_info=True)
-        self.queue.set_status(applicant["id"], "selected_awaiting_human",
-                              note=f"slot {found['date']} {found['time']}")
-        self._say("selected_awaiting_human", applicant_id=applicant["id"],
-                  slot=slot)
+            for dmy in dates:
+                if self.paused or self._stop.is_set():
+                    break
+                t0 = time.perf_counter()
+                if applicant.get("data"):
+                    try:
+                        await driver.fill_applicant(applicant["data"])
+                    except Exception:
+                        logger.warning("prefill failed", exc_info=True)
+                await driver.apply_filters(None, category)
+                try:
+                    await driver._search(dmy)
+                except SiteNotConfigured as exc:
+                    self._say("search_error", date=dmy, error=str(exc))
+                    continue
+                grid = await driver._read_grid(dmy)
+                self.feed["stats"]["searches"] += 1
+                self.feed["stats"]["latency_ms"] = round(
+                    (time.perf_counter() - t0) * 1000)
+                self.feed["stats"]["last_check"] = time.time()
+                if grid:
+                    found = {"date": dmy, "time": grid[0].split()[-1]}
+                    break
+            if not found:
+                self._say("monitoring", applicant_id=applicant["id"],
+                          state={"bookable": 0, "dates": dates})
+            else:
+                # a bookable slot: select it, prefill, alarm, hand off
+                slot = {"date": found["date"], "time": found["time"],
+                        "category": category}
+                try:
+                    ok = await driver.locate({"date": found["date"],
+                                              "time": found["time"]})
+                    if not ok:
+                        raise SlotNotFound("slot vanished before selection")
+                    await driver.reserve({"date": found["date"],
+                                          "time": found["time"]})
+                except (SlotNotFound, Exception) as exc:
+                    self._say("select_error", error=str(exc), slot=slot)
+                    return
+                if applicant.get("data"):
+                    try:
+                        await driver.fill_applicant(applicant["data"])
+                    except Exception:
+                        logger.warning("prefill failed", exc_info=True)
+                self.queue.set_status(
+                    applicant["id"], "selected_awaiting_human",
+                    note=f"slot {found['date']} {found['time']}")
+                self._say("selected_awaiting_human",
+                          applicant_id=applicant["id"], slot=slot)
+        if not found:
+            await self._sleep(self.interval)
 
     # ── operator actions (dashboard) ─────────────────────────────────────
 
     async def request_otp(self) -> dict:
-        driver = await self._driver()
-        if driver is None or not isinstance(driver, GvcwSiteDriver):
-            return {"ok": False, "error": "no bridged page"}
-        err = await driver.request_otp()
-        if err:
-            return {"ok": False, "error": err}
-        self._say("otp_sent")
-        return {"ok": True}
+        async with self._ops_lock:
+            driver = await self._driver()
+            if driver is None or not isinstance(driver, GvcwSiteDriver):
+                return {"ok": False, "error": "no bridged page"}
+            err = await driver.request_otp()
+            if err:
+                return {"ok": False, "error": err}
+            self._say("otp_sent")
+            return {"ok": True}
 
     async def submit_otp(self, code: str) -> dict:
-        driver = await self._driver()
-        if driver is None:
-            return {"ok": False, "error": "no bridged page"}
-        try:
-            await driver.enter_otp(code.strip())
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-        return {"ok": True}
+        async with self._ops_lock:
+            driver = await self._driver()
+            if driver is None:
+                return {"ok": False, "error": "no bridged page"}
+            try:
+                await driver.enter_otp(code.strip())
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+            return {"ok": True}
 
     async def confirm_book(self) -> dict:
-        applicant = self.queue.current()
-        if not applicant or applicant["status"] != "selected_awaiting_human":
-            return {"ok": False, "error": "no held booking to confirm"}
-        self.queue.set_status(applicant["id"], "submitting")
-        driver = await self._driver()
-        if driver is None:
-            return {"ok": False, "error": "no bridged page"}
-        try:
-            await driver.submit()
-            outcome = await driver.submit_outcome()
-        except Exception as exc:
-            outcome = {"error": str(exc)}
-        if outcome.get("ok"):
-            ref = outcome["ok"]
-            self.queue.set_status(applicant["id"], "booked",
-                                  result_ref=ref)
-            self._say("booked", applicant_id=applicant["id"], ref=ref)
-            return {"ok": True, "confirmation_ref": ref}
-        err = outcome.get("error") or "no confirmation — verify the page"
-        self.queue.set_status(applicant["id"], "outcome_unknown",
-                              note=err)
-        self._say("outcome_unknown", applicant_id=applicant["id"], error=err)
-        return {"ok": False, "error": err}
+        async with self._ops_lock:
+            applicant = self.queue.current()
+            if not applicant or applicant["status"] != "selected_awaiting_human":
+                return {"ok": False, "error": "no held booking to confirm"}
+            self.queue.set_status(applicant["id"], "submitting")
+            try:
+                page = await self.page_factory()
+                driver = GvcwSiteDriver(page,
+                                        {"bookingfor": "0", "method": "1"})
+                await driver.submit()
+                outcome = await driver.submit_outcome()
+            except Exception as exc:
+                # anything after `submitting` was set: park — never guess
+                self.queue.set_status(
+                    applicant["id"], "outcome_unknown",
+                    note=f"lost during submission: {exc}")
+                self._say("outcome_unknown", applicant_id=applicant["id"],
+                          error=str(exc))
+                return {"ok": False, "error": str(exc)}
+            if outcome.get("ok"):
+                ref = outcome["ok"]
+                self.queue.set_status(applicant["id"], "booked",
+                                      result_ref=ref)
+                self._say("booked", applicant_id=applicant["id"], ref=ref)
+                # reset the SAME page back to the add form for the next
+                # applicant — verified success must visibly navigate home
+                try:
+                    await page.goto(
+                        f"{self.allowed_origin}/appointments/add")
+                except Exception as exc:
+                    self._say("reset_error", error=str(exc))
+                return {"ok": True, "confirmation_ref": ref}
+            err = outcome.get("error") or "no confirmation — verify the page"
+            self.queue.set_status(applicant["id"], "outcome_unknown",
+                                  note=err)
+            self._say("outcome_unknown", applicant_id=applicant["id"],
+                      error=err)
+            return {"ok": False, "error": err}
 
     async def _driver(self):
         if self.tab_id is None:

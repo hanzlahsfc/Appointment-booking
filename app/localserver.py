@@ -56,7 +56,9 @@ table{width:100%;border-collapse:collapse}td,th{padding:4px 6px;border-bottom:1p
 <button id="sndt" onclick="beep()" class="ghost" style="display:none">Test</button>
 <button onclick="ack()">Acknowledge</button></div></div>
 <div class="card"><h2>Pair portal tab</h2>
-<div class="muted">Open the signed-in portal page in Chrome, then pair its bridge tab id.</div>
+<div class="muted">1. In the extension popup: paste this token → Connect →
+ select the portal tab. 2. Then press Pair here.</div>
+<div class="muted">extension token: <code id="xtoken" style="user-select:all"></code></div>
 <input id="tabid" placeholder="tab id (e.g. 413653551)"><button onclick="pair()">Pair</button>
 <div id="pair-status" class="muted"></div></div>
 <div class="card"><h2>Monitor config</h2>
@@ -84,6 +86,7 @@ From <input id="df" placeholder="DD/MM/YYYY"> To <input id="dt" placeholder="DD/
 <script>
 const T = new URLSearchParams(location.search).get('token') || localStorage.ab_token || '';
 localStorage.ab_token = T;
+document.getElementById('xtoken').textContent = T || '(restart via START.bat to get one)';
 let actx=null, alarmT=null;
 function enableSound(){actx=new (window.AudioContext||webkitAudioContext)();actx.resume();snd.style.display='none';sndt.style.display='';}
 function beep(){if(!actx)return;const o=actx.createOscillator(),g=actx.createGain();o.connect(g);g.connect(actx.destination);o.frequency.value=880;g.gain.value=.12;o.start();o.stop(actx.currentTime+.35);}
@@ -142,7 +145,9 @@ def create_app(queue: ApplicantQueue, monitor: LocalMonitor,
             await websocket.close(code=4401)
             return
         await websocket.accept()
-        client = BridgeClient(send_raw=websocket.send_text)
+        import uuid
+        client = BridgeClient(client_id=uuid.uuid4().hex,
+                              send_raw=websocket.send_text)
         HUB.register(client)
         try:
             while True:
@@ -319,8 +324,9 @@ def run() -> None:
 
     async def page_factory():
         # The bundled extension holds the WS socket into HUB and the
-        # operator picks the tab in its popup. If nothing is paired we have
-        # no page — the monitor waits in "awaiting_pair".
+        # operator picks the tab in its popup; Pair() pins that tab — the
+        # page refuses to follow if the selection changes (pause, never
+        # redirect to another tab).
         from .ws_page import WsPage
         try:
             client = HUB.client()
@@ -329,7 +335,8 @@ def run() -> None:
         if client is None:
             raise BridgeError(
                 "no extension tab connected — pair one in the extension popup")
-        return WsPage(client, [allowed], allow_writes=True)
+        return WsPage(client, [allowed], allow_writes=True,
+                      pinned_tab=monitor.tab_id)
 
     monitor = LocalMonitor(queue, page_factory, allowed)
     app = create_app(queue, monitor, HUB, allowed, token)

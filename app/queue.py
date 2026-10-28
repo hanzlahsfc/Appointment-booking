@@ -5,9 +5,12 @@ restarts. The monitor processes them in `position` order: while a booking
 is held or unresolved the queue PARKS — it never advances past an
 ambiguous outcome and never reprocesses an identity.
 
-Applicant data is private: names/keys stay in this local DB only — never
-committed, never logged raw. Identity dedup hashes (surname+passport)
-so a passport number never leaves plaintext anywhere.
+Applicant data is private and local-only: `data_json` DOES hold the full
+applicant form fields (including passport) because prefill needs them —
+it lives ONLY in this local `data/queue.db`, is never committed, logged,
+sent to the API, or included in diagnostics. Deleting an applicant (or
+the file) removes it permanently. Identity dedup additionally hashes
+surname+passport so the raw pair isn't the uniqueness key.
 """
 from __future__ import annotations
 
@@ -60,6 +63,13 @@ class ApplicantQueue:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        # A crash mid-submission leaves outcome genuinely unknown: park it,
+        # never resume searching as if nothing happened.
+        with self._conn:
+            self._conn.execute(
+                "UPDATE applicants SET status='outcome_unknown',"
+                " note='server restarted during submission — verify the "
+                "portal before retrying' WHERE status='submitting'")
 
     # ── CRUD ─────────────────────────────────────────────────────────────
 

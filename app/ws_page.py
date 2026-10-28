@@ -37,8 +37,10 @@ class WsPage:
         allowed_origins: list[str],
         *,
         allow_writes: bool = False,
+        pinned_tab: int | None = None,
     ):
         self._c = client
+        self.pinned_tab = pinned_tab
         self.allowed = {_origin(o) for o in allowed_origins}
         self.allow_writes = allow_writes
         self._url: str | None = None
@@ -50,6 +52,12 @@ class WsPage:
             raise BridgeError(
                 "read-only page — rebuild with allow_writes (explicit "
                 "operator action)")
+        # If the operator changed the popup selection (or the extension
+        # reconnected to a different tab), STOP — never follow another tab.
+        if self.pinned_tab is not None and self._c.tab_id != self.pinned_tab:
+            raise BridgeError(
+                f"selected tab changed ({self._c.tab_id} != "
+                f"{self.pinned_tab}) — automation paused; re-pair to continue")
         url = await self._c.evaluate("location.href", timeout=10) or ""
         if _origin(url) not in self.allowed:
             raise BridgeError(

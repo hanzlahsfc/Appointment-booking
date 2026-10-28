@@ -24,7 +24,10 @@ cloud, no other clients.
    the browser (the URL carries a token that signs you in).
 2. In Chrome, open the official portal and **sign in / solve the captcha**
    on the appointment page as usual.
-3. In the extension popup, select **that tab** — the dashboard pairs it.
+3. In the extension popup: paste the **token shown on the dashboard's
+   "Pair portal tab" card**, press Connect, then select **that tab** —
+   the token authenticates the socket; a bare tab pick is not enough.
+   Press **Pair** on the dashboard.
 4. Add your applicants to the queue (name + details — private, stored
    only in this folder), pick the visa category and date range, press
    **Start**.
