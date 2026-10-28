@@ -148,6 +148,8 @@ class LocalMonitor:
                     await driver._search(dmy)
                 except SiteNotConfigured as exc:
                     self._say("search_error", date=dmy, error=str(exc))
+                    # keep the feed bounded — errors grow one per date
+                    self.feed["stats"]["errors_last"] = str(exc)
                     continue
                 grid = await driver._read_grid(dmy)
                 self.feed["stats"]["searches"] += 1
@@ -157,6 +159,9 @@ class LocalMonitor:
                 if grid:
                     found = {"date": dmy, "time": grid[0].split()[-1]}
                     break
+                # paced like a person clicking dates — not a burst; the
+                # portal rate-limits hard and rapid scans look like abuse
+                await asyncio.sleep(3 + (hash(dmy) % 3))
             if not found:
                 self._say("monitoring", applicant_id=applicant["id"],
                           state={"bookable": 0, "dates": dates})
