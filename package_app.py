@@ -18,6 +18,7 @@ INCLUDE = [
     "requirements.txt",
     "SETUP.bat",
     "START.bat",
+    "DIAGNOSE.bat",
     "CLIENT-README.md",
     "HOW-TO-PAIR.md",
     "HANDOFF.md",
