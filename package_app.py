@@ -19,6 +19,7 @@ INCLUDE = [
     "SETUP.bat",
     "START.bat",
     "CLIENT-README.md",
+    "HOW-TO-PAIR.md",
     "HANDOFF.md",
 ]
 
@@ -45,15 +46,22 @@ def _skip(path: Path) -> bool:
 def main() -> int:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+    # Text files must carry CRLF line endings inside the ZIP — cmd.exe
+    # misparses LF-only batch files (the window flashes and closes).
     with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zf:
         for item in INCLUDE:
             p = ROOT / item
-            if p.is_file():
-                zf.write(p, item); count += 1
-                continue
-            for f in sorted(p.rglob("*")):
-                if f.is_file() and not _skip(f):
-                    zf.write(f, f.relative_to(ROOT)); count += 1
+            files = [p] if p.is_file() else [
+                f for f in sorted(p.rglob("*"))
+                if f.is_file() and not _skip(f)]
+            for f in files:
+                arc = str(f.relative_to(ROOT)).replace("\\", "/")
+                if f.suffix.lower() in {".bat", ".cmd", ".txt", ".md"}:
+                    text = f.read_bytes().replace(b"\r\n", b"\n")
+                    zf.writestr(arc, text.replace(b"\n", b"\r\n"))
+                else:
+                    zf.write(f, arc)
+                count += 1
     print(f"built {OUT} ({count} files, {OUT.stat().st_size:,} bytes)")
     return 0
 
