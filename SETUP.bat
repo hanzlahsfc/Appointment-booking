@@ -50,7 +50,12 @@ if not %errorlevel%==0 (
   pause
   exit /b 1
 )
-"%VENV%" -m pip install -r requirements.txt
+if exist "wheels\" (
+  echo Using bundled wheels (no internet needed) ...
+  "%VENV%" -m pip install --no-index --find-links wheels -r requirements.txt
+) else (
+  "%VENV%" -m pip install -r requirements.txt
+)
 if not %errorlevel%==0 (
   echo [FAIL] Dependency install failed - check your internet connection.
   pause

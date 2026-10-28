@@ -15,6 +15,7 @@ OUT = ROOT / "dist" / "Appointment-booker-client.zip"
 INCLUDE = [
     "app",
     "extension",
+    "wheels",
     "requirements.txt",
     "SETUP.bat",
     "START.bat",
