@@ -9,20 +9,23 @@ cloud, no other clients.
 1. Extract the ZIP anywhere — the folder can have spaces in the name.
 2. Run **`SETUP.bat`**
    - If it says *"Python 3.11+ not found"*: install Python from
-     https://www.python.org/downloads/ (tick **Add python.exe to PATH** —
-     no admin rights needed), then re-run SETUP.bat.
+     [python.org/downloads](https://www.python.org/downloads/) (tick
+     **Add python.exe to PATH** — no admin rights needed), then re-run
+     SETUP.bat.
    - It creates a local virtual environment and installs dependencies.
-   - Then it shows you how to load the Chrome extension:
-     `chrome://extensions` → **Developer mode** → **Load unpacked** →
-     choose the `extension\` folder inside this package.
+   - Then it shows you how to load the Chrome extension: type
+     `chrome://extensions` in the address bar → **Developer mode** →
+     **Load unpacked** → choose the `extension\` folder inside this
+     package.
      (The batch file cannot install the extension for you — Chrome
      requires it be loaded by hand.)
 
 ## Every run
 
 1. Run **`START.bat`** — a local server starts and your dashboard opens in
-   the browser (the URL carries a token that signs you in).
-2. In Chrome, open the official portal and **sign in / solve the captcha**
+   the browser at [http://127.0.0.1:8080/](http://127.0.0.1:8080/) (the
+   URL carries a token that signs you in).
+2. In Chrome, open the [official appointment portal](https://pk-gr-services.gvcworld.eu/appointments/add) and **sign in / solve the captcha**
    on the appointment page as usual.
 3. In the extension popup: paste the **token shown on the dashboard's
    "Pair portal tab" card**, press Connect, then select **that tab** —

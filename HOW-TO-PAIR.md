@@ -5,7 +5,8 @@ Everything below works on any Windows PC — no machine-specific paths.
 
 ## Step 1 — Load the Chrome extension (one time)
 
-1. Open **`chrome://extensions`** in Chrome.
+1. Type **`chrome://extensions`** in Chrome's address bar (it's a
+   browser-internal page — it cannot be a link).
 2. Turn on **Developer mode** — toggle in the top-right.
 3. Click **Load unpacked** (top-left) and choose:
    `<this folder>\extension`
@@ -20,7 +21,7 @@ Everything below works on any Windows PC — no machine-specific paths.
 Run **`START.bat`** (double-click).
 
 - The local server starts on port **8080** and your dashboard opens in
-  the browser automatically.
+  the browser automatically at [http://127.0.0.1:8080/](http://127.0.0.1:8080/).
 - If a server is already running it just re-opens the dashboard.
 - **Keep the black window open** while the app runs.
 
@@ -30,8 +31,8 @@ token signs you in.
 
 ## Step 3 — Sign into the portal tab yourself
 
-1. In Chrome, open the official appointment page:
-   `https://pk-gr-services.gvcworld.eu/appointments/add`
+1. In Chrome, open the
+   [official appointment page](https://pk-gr-services.gvcworld.eu/appointments/add).
 2. **Sign in manually** and complete any captcha, until the booking form
    loads.
 3. Leave that tab open — the app never logs in for you.
