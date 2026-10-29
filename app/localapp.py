@@ -58,6 +58,7 @@ class LocalMonitor:
         self._ops_lock = asyncio.Lock()     # searches vs human actions
         self._consec_errors = 0
         self.paused = False
+        self.captcha_api_key: str | None = None  # set from config at boot
         self.feed: dict = {"status": "idle", "events": [],
                            "stats": {"cycles": 0, "searches": 0,
                                      "latency_ms": None, "last_check": None}}
@@ -223,6 +224,18 @@ class LocalMonitor:
                 return {"ok": False, "error": str(exc)}
             return {"ok": True}
 
+    async def solve_captcha(self) -> dict:
+        """Explicit captcha solve on the held page — /captcha command."""
+        async with self._ops_lock:
+            if not self.captcha_api_key:
+                return {"ok": False, "error": "no captcha.api_key configured"}
+            page = await self.page_factory()
+            from .captcha_solver import solve_on_page
+            err = await solve_on_page(page, self.captcha_api_key)
+            if err:
+                return {"ok": False, "error": err}
+            return {"ok": True}
+
     async def confirm_book(self) -> dict:
         async with self._ops_lock:
             applicant = self.queue.current()
@@ -233,6 +246,12 @@ class LocalMonitor:
                 page = await self.page_factory()
                 driver = GvcwSiteDriver(page,
                                         {"bookingfor": "0", "method": "1"})
+                if self.captcha_api_key:
+                    from .captcha_solver import solve_on_page
+                    self._say("captcha_solving")
+                    err = await solve_on_page(page, self.captcha_api_key)
+                    self._say("captcha_solve_failed" if err
+                              else "captcha_solved", error=err)
                 await driver.submit()
                 outcome = await driver.submit_outcome()
             except Exception as exc:

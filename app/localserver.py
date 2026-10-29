@@ -346,6 +346,7 @@ def run() -> None:
                       pinned_tab=monitor.tab_id)
 
     monitor = LocalMonitor(queue, page_factory, allowed)
+    monitor.captcha_api_key = cfg.captcha_api_key
     from .telegram_agent import make_agent
     tg = make_agent(monitor, queue, data_dir,
                     cfg.telegram_token, cfg.telegram_chat_id)
@@ -358,6 +359,8 @@ def run() -> None:
         print(f"Telegram relay: on — this machine is [{tg.mid}]")
     else:
         print("Telegram relay: off (set telegram.token + chat_id in config.yaml)")
+    if monitor.captcha_api_key:
+        print("Captcha solver: on (auto-solve before confirm)")
     print(f"Portal origin: {allowed} · extension bridge: ws://127.0.0.1:{port}/bridge")
     try:
         webbrowser.open(url)

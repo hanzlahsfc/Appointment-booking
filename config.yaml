@@ -60,3 +60,9 @@ notifications:
 telegram:
   token: ""      # bot token from @BotFather (or set TELEGRAM_BOT_TOKEN)
   chat_id: ""    # group chat id, e.g. -1001234567890 (or TELEGRAM_CHAT_ID)
+
+# CAPTCHA auto-solve (optional) — 2captcha.com key. With this set,
+# /confirm auto-solves reCAPTCHA first; /captcha <ID> solves on demand.
+# Without it, a human solves the captcha on the machine as before.
+captcha:
+  api_key: ""    # or set CAPTCHA_API_KEY env var

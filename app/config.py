@@ -224,6 +224,7 @@ class Config:
     proxy: str | None = None  # e.g. socks5://user:pass@host:1080 or http://host:3128
     telegram_token: str | None = None   # bot token — shared by all machines
     telegram_chat_id: str | None = None  # group chat the operator watches
+    captcha_api_key: str | None = None   # 2captcha key — auto-solve on confirm
     root: Path = ROOT
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
     state_dir: Path = field(default_factory=lambda: ROOT / "state")
@@ -381,6 +382,10 @@ def load_config(path: str | Path | None = None) -> Config:
                                  str(tg_raw.get("token", "")).strip()) or None,
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID",
                                    str(tg_raw.get("chat_id", "")).strip()) or None,
+        captcha_api_key=os.getenv(
+            "CAPTCHA_API_KEY",
+            str((raw.get("captcha", {}) or {}).get("api_key", "")).strip()
+        ) or None,
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.creds_dir.mkdir(parents=True, exist_ok=True)

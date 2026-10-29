@@ -66,3 +66,15 @@ actually waiting for a code, so it can't hit the wrong one.
 - The bot needs internet on each machine (api.telegram.org must be
   reachable). If the relay goes quiet, the machines still work —
   commands just queue for when they're back.
+
+## CAPTCHA auto-solve (optional — 2captcha)
+
+Set `captcha.api_key` in `config.yaml` (or env `CAPTCHA_API_KEY`):
+
+- `/confirm <ID>` automatically attempts a solver-pass before pressing
+  Confirm and book — a failed solve still lets a human finish manually.
+- `/captcha <ID>` solves on demand (30–90s typical).
+- Without a key, captcha stays manual on the machine — nothing else changes.
+
+Cost is ~$1–3 / 1000 solves on 2captcha.com; the token is injected into
+`g-recaptcha-response` and its callback fired — no bypass of the form.

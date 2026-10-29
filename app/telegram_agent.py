@@ -154,8 +154,8 @@ class TelegramAgent:
             extra += f" · {str(ev['error'])[:140]}"
         if status == "selected_awaiting_human":
             extra += (f"\n→ /otp-request {self.mid} then "
-                      f"/otp {self.mid} <code>, captcha if asked, "
-                      f"/confirm {self.mid}")
+                      f"/otp {self.mid} <code>, /captcha {self.mid} if "
+                      f"asked, /confirm {self.mid}")
         elif status == "otp_sent":
             extra += f"\n→ send /otp {self.mid} <code from SMS>"
         await self.send(f"[{self.mid}] {status} · {name}{extra}")
@@ -183,6 +183,7 @@ class TelegramAgent:
                 "/queue [ID] — applicant queue\n"
                 f"/otp-request ID — send the SMS code\n"
                 "/otp ID <code> — enter the SMS code\n"
+                "/captcha ID — auto-solve the captcha\n"
                 "/confirm ID — press Confirm and book\n"
                 "/pause ID · /resume ID · /stop ID")
             return
@@ -244,9 +245,20 @@ class TelegramAgent:
             r = await self.monitor.submit_otp(code)
             await self.send(
                 f"[{self.mid}] " +
-                ("code entered — solve captcha on the machine if asked, "
+                (f"code entered — /captcha {self.mid} to auto-solve, or "
+                 f"solve it on the machine, "
                  f"then /confirm {self.mid}" if r.get("ok")
                  else f"otp failed: {r.get('error')}"))
+            return
+
+        if cmd == "captcha":
+            await self.send(f"[{self.mid}] solving captcha (30-90s)…")
+            r = await self.monitor.solve_captcha()
+            await self.send(f"[{self.mid}] " +
+                            ("captcha token injected — /confirm "
+                             f"{self.mid} to finish" if r.get("ok")
+                             else f"captcha solve failed: {r.get('error')} "
+                                  "— solve it on the machine"))
             return
 
         if cmd == "confirm":
