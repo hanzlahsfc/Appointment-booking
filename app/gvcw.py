@@ -237,15 +237,34 @@ class GvcwSiteDriver:
             )
         # request finished — the markers are whatever it just rendered
         markers = await self.page.evaluate(
-            "() => ({ grid: !!document.querySelector('#result'),"
-            " msgShown: !!(document.querySelector('#resultMessage') && "
-            "  !document.querySelector('#resultMessage').classList.contains('hidden'))})"
+            "() => { const m = document.querySelector('#resultMessage');"
+            " const g = document.querySelector('#result');"
+            " const err = document.querySelector('.ajs-message,"
+            " .alertify-message, .alertify .ajs-content');"
+            " return { grid: !!g,"
+            "  msgShown: !!(m && !m.classList.contains('hidden')),"
+            "  msgText: m ? (m.innerText||'').trim().slice(0,120) : '',"
+            "  errText: err ? (err.innerText||'').trim().slice(0,120) : '',"
+            "  title: document.title.slice(0,60),"
+            "  login: !!(document.querySelector('#username') &&"
+            "            document.querySelector('#password')),"
+            "  unauth: document.title.startsWith('401')||"
+            "   (document.body&&document.body.innerText"
+            "    .includes('not verify that you are authorized'))}; }"
         ) or {}
+        if markers.get("login") or markers.get("unauth"):
+            raise SiteNotConfigured(
+                f"search for {date_dmy}: session expired — the portal is "
+                "showing its login/401 page; sign back in on the tab")
+        if markers.get("errText"):
+            raise SiteNotConfigured(
+                f"search for {date_dmy} rejected by the portal: "
+                f"{markers['errText']}")
         if not (markers.get("grid") or markers.get("msgShown")):
             raise SiteNotConfigured(
                 f"search for {date_dmy} completed but rendered neither "
                 "#result nor #resultMessage — failed read, not zero slots"
-            )
+                f" (page: {markers.get('title','?')})")
 
     async def list_slots(self) -> list[str]:
         """Search each date in the configured window and return one label per
