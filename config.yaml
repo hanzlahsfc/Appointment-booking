@@ -54,3 +54,9 @@ notifications:
   resend_api_key_env: "RESEND_API_KEY"
   from: "GVCW Slot Alert <oncall@yourdomain.com>"
   to: ["client@example.com"]
+# Telegram relay — all machines + your phone share ONE bot and ONE group.
+# Each machine announces itself as [HOSTNAME-XXXX] and answers /commands
+# addressed to its id. See TELEGRAM-SETUP.md.
+telegram:
+  token: ""      # bot token from @BotFather (or set TELEGRAM_BOT_TOKEN)
+  chat_id: ""    # group chat id, e.g. -1001234567890 (or TELEGRAM_CHAT_ID)

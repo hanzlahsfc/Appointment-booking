@@ -121,9 +121,19 @@ setInterval(refresh,3000);refresh();
 
 
 def create_app(queue: ApplicantQueue, monitor: LocalMonitor,
-               bridge_client, allowed_origin: str, token: str) -> FastAPI:
+               bridge_client, allowed_origin: str, token: str,
+               telegram=None) -> FastAPI:
     app = FastAPI(title="Appointment Booker — Local", docs_url=None,
                   redoc_url=None)
+
+    if telegram is not None:
+        @app.on_event("startup")
+        async def _tg_start():
+            telegram.start()
+
+        @app.on_event("shutdown")
+        async def _tg_stop():
+            await telegram.stop()
 
     def authed(request: Request) -> bool:
         auth = request.headers.get("authorization", "")
@@ -336,11 +346,18 @@ def run() -> None:
                       pinned_tab=monitor.tab_id)
 
     monitor = LocalMonitor(queue, page_factory, allowed)
-    app = create_app(queue, monitor, HUB, allowed, token)
+    from .telegram_agent import make_agent
+    tg = make_agent(monitor, queue, data_dir,
+                    cfg.telegram_token, cfg.telegram_chat_id)
+    app = create_app(queue, monitor, HUB, allowed, token, telegram=tg)
     port = int(getattr(cfg, "local_port", 8080))
     url = f"http://127.0.0.1:{port}/?token={token}"
     print(f"Appointment Booker — local app")
     print(f"Dashboard: {url}")
+    if tg:
+        print(f"Telegram relay: on — this machine is [{tg.mid}]")
+    else:
+        print("Telegram relay: off (set telegram.token + chat_id in config.yaml)")
     print(f"Portal origin: {allowed} · extension bridge: ws://127.0.0.1:{port}/bridge")
     try:
         webbrowser.open(url)

@@ -1,0 +1,287 @@
+"""Telegram relay — one bot + one group chat is the bus between every
+machine running the app and the operator's phone.
+
+No tunnels, no public IP, no port forwarding: machines only make outbound
+HTTPS calls to api.telegram.org, which works behind any NAT/firewall.
+
+All machines share the same bot token and poll ``getUpdates`` — and this is
+the subtle part: passing an ``offset`` to getUpdates CONFIRMS every update
+below it, which would let one machine eat another machine's commands. So we
+always poll ``offset=0`` (never confirm anything) and dedupe update ids
+locally. Telegram keeps unconfirmed updates for ~24h, far longer than any
+command needs to live.
+
+Commands (posted in the group chat):
+  /status              every machine replies with its status
+  /status ID           only machine ID replies
+  /queue [ID]          queue listing
+  /otp-request ID      ask the portal to send the SMS code (ID's machine)
+  /otp ID 123456       fill the OTP into the held booking on ID's machine
+  /confirm ID          press Confirm-and-book on ID's machine
+  /pause ID · /resume ID · /start ID · /stop ID   monitor control
+
+Machine ID: persisted in data/machine-id — <hostname>-<4hex>.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import secrets
+import socket
+import time
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_API = "https://api.telegram.org/bot{token}/{method}"
+_CMD = re.compile(r"^/([a-zA-Z_-]+)(?:\s+(\S+))?(?:\s+(.*))?$")
+_NOTABLE = {  # feed statuses that generate a group message
+    "selected_awaiting_human", "otp_sent", "booked", "outcome_unknown",
+    "failed", "queue_finished", "bridge_error", "error", "reset_error",
+}
+
+
+def machine_id(data_dir: Path) -> str:
+    """Stable per-machine id, e.g. 'NADIR-A4F2'."""
+    p = data_dir / "machine-id"
+    if p.exists():
+        return p.read_text().strip()
+    host = re.sub(r"[^A-Za-z0-9]", "", socket.gethostname()).upper()[:8] or "PC"
+    mid = f"{host}-{secrets.token_hex(2).upper()}"
+    p.write_text(mid)
+    return mid
+
+
+class TelegramAgent:
+    def __init__(self, monitor, queue, token: str, chat_id: str, mid: str):
+        self.monitor = monitor
+        self.queue = queue
+        self.token = token
+        self.chat_id = str(chat_id)
+        self.mid = mid
+        self._seen: set[int] = set()
+        self._last_status: str | None = None
+        self._task: asyncio.Task | None = None
+        self._stop = asyncio.Event()
+        self._http = None  # httpx.AsyncClient, created inside the loop
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    def start(self):
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self):
+        self._stop.set()
+        if self._task:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        if self._http:
+            await self._http.aclose()
+
+    # ── telegram api ─────────────────────────────────────────────────────
+
+    def _url(self, method: str) -> str:
+        return _API.format(token=self.token, method=method)
+
+    async def send(self, text: str) -> None:
+        try:
+            await self._http.post(self._url("sendMessage"), json={
+                "chat_id": self.chat_id, "text": text,
+                "disable_web_page_preview": True,
+            })
+        except Exception as exc:
+            logger.warning("telegram send failed: %s", exc)
+
+    async def _updates(self) -> list[dict]:
+        # offset=0 — never confirm updates; shared-token machines would
+        # otherwise consume each other's commands. Deduped by self._seen.
+        try:
+            r = await self._http.get(self._url("getUpdates"),
+                                     params={"offset": 0, "limit": 100})
+            data = r.json()
+            return data.get("result", []) if data.get("ok") else []
+        except Exception as exc:
+            logger.warning("telegram poll failed: %s", exc)
+            return []
+
+    # ── main loop ────────────────────────────────────────────────────────
+
+    async def _run(self):
+        import httpx
+        self._http = httpx.AsyncClient(timeout=15)
+        await self.send(f"[{self.mid}] online — commands: /status, /otp, "
+                        f"/otp-request, /confirm, /pause, /resume")
+        while not self._stop.is_set():
+            try:
+                await self._poll_commands()
+                await self._watch_feed()
+            except Exception as exc:
+                logger.warning("telegram loop error: %s", exc)
+            await asyncio.sleep(4)
+
+    async def _poll_commands(self):
+        for upd in await self._updates():
+            uid = upd.get("update_id")
+            if uid in self._seen:
+                continue
+            self._seen.add(uid)
+            if len(self._seen) > 5000:
+                self._seen = set(list(self._seen)[-2500:])
+            msg = upd.get("message") or upd.get("edited_message") or {}
+            if str(msg.get("chat", {}).get("id")) != self.chat_id:
+                continue
+            text = (msg.get("text") or "").strip()
+            if text.startswith("/"):
+                await self._handle(text)
+
+    async def _watch_feed(self):
+        status = self.monitor.feed.get("status")
+        if status == self._last_status:
+            return
+        self._last_status = status
+        if status not in _NOTABLE:
+            return
+        ev = (self.monitor.feed.get("events") or [{}])[-1]
+        cur = self.queue.current() or {}
+        name = (cur.get("data") or {}).get("display") or cur.get("name") or "?"
+        extra = ""
+        if ev.get("slot"):
+            extra += f" · slot {ev['slot']}"
+        if ev.get("ref"):
+            extra += f" · ref {ev['ref']}"
+        if ev.get("error"):
+            extra += f" · {str(ev['error'])[:140]}"
+        if status == "selected_awaiting_human":
+            extra += (f"\n→ /otp-request {self.mid} then "
+                      f"/otp {self.mid} <code>, captcha if asked, "
+                      f"/confirm {self.mid}")
+        elif status == "otp_sent":
+            extra += f"\n→ send /otp {self.mid} <code from SMS>"
+        await self.send(f"[{self.mid}] {status} · {name}{extra}")
+
+    # ── commands ─────────────────────────────────────────────────────────
+
+    async def _handle(self, text: str):
+        m = _CMD.match(text)
+        if not m:
+            return
+        cmd, target, rest = m.group(1).lower(), m.group(2), m.group(3)
+
+        # broadcast commands answer for everyone when no target is given;
+        # anything targeted at a different machine id is dropped here —
+        # every machine sees every group message.
+        broadcast = cmd in {"status", "queue", "list", "help"}
+        if target and target.upper() != self.mid:
+            if broadcast or not (cmd == "otp" and target.isdigit()):
+                return  # addressed to another machine (or bad broadcast)
+
+        if cmd in {"help", "start"}:
+            await self.send(
+                f"[{self.mid}] commands:\n"
+                "/status [ID] — machine status\n"
+                "/queue [ID] — applicant queue\n"
+                f"/otp-request ID — send the SMS code\n"
+                "/otp ID <code> — enter the SMS code\n"
+                "/confirm ID — press Confirm and book\n"
+                "/pause ID · /resume ID · /stop ID")
+            return
+
+        if cmd == "status":
+            s = self.monitor.snapshot()
+            q = s["queue"]
+            cur = s["current"]
+            cname = ((cur or {}).get("data") or {}).get("display") or "-"
+            counts = {}
+            for row in q:
+                counts[row["status"]] = counts.get(row["status"], 0) + 1
+            summary = ", ".join(f"{k}:{v}" for k, v in counts.items()) or "empty"
+            await self.send(
+                f"[{self.mid}] {s['status']}"
+                f"{' PAUSED' if s['paused'] else ''}"
+                f" · tab {'paired' if s['tab_id'] else 'unpaired'}"
+                f" · now: {cname} · queue: {summary}")
+            return
+
+        if cmd in {"queue", "list"}:
+            rows = self.queue.list()
+            if not rows:
+                await self.send(f"[{self.mid}] queue empty")
+                return
+            lines = []
+            for i, r in enumerate(rows[:15], 1):
+                name = (r.get("data") or {}).get("display") or "?"
+                lines.append(f"{i}. {name} — {r['status']}")
+            await self.send(f"[{self.mid}] queue:\n" + "\n".join(lines))
+            return
+
+        if cmd == "otp-request":
+            r = await self.monitor.request_otp()
+            await self.send(f"[{self.mid}] " + ("OTP requested — check the "
+                            "applicant's phone, then /otp " + self.mid +
+                            " <code>" if r.get("ok")
+                            else f"otp-request failed: {r.get('error')}"))
+            return
+
+        if cmd == "otp":
+            # "/otp <code>" (no machine id) only applies to this machine when
+            # it is actually holding a booking — every machine sees every
+            # group message, so a bare code must never hit a machine that
+            # isn't waiting. Targeted form: /otp <ID> <code>.
+            waiting = self.monitor.feed.get("status") in (
+                "selected_awaiting_human", "otp_sent")
+            if target and target.upper() == self.mid:
+                code = (rest or "").strip()
+            elif target and target.isdigit() and waiting:
+                code = target
+            elif target and target.isdigit():
+                return  # bare code, not waiting — not for us
+            else:
+                return  # addressed to another machine
+            if not code:
+                await self.send(f"[{self.mid}] usage: /otp {self.mid} <code>")
+                return
+            r = await self.monitor.submit_otp(code)
+            await self.send(
+                f"[{self.mid}] " +
+                ("code entered — solve captcha on the machine if asked, "
+                 f"then /confirm {self.mid}" if r.get("ok")
+                 else f"otp failed: {r.get('error')}"))
+            return
+
+        if cmd == "confirm":
+            r = await self.monitor.confirm_book()
+            if r.get("ok"):
+                await self.send(f"[{self.mid}] BOOKED ✓ "
+                                f"ref {r.get('confirmation_ref')}")
+            else:
+                await self.send(f"[{self.mid}] confirm failed — parked for "
+                                f"review: {r.get('error')}")
+            return
+
+        if cmd in {"pause", "resume", "stop", "start"}:
+            if cmd == "pause":
+                self.monitor.paused = True
+            elif cmd == "resume":
+                self.monitor.paused = False
+            elif cmd == "stop":
+                await self.monitor.stop()
+                self.monitor._task = None
+            elif cmd == "start":
+                if self.monitor._task is None or self.monitor._task.done():
+                    self.monitor._stop.clear()
+                    self.monitor.start()
+            await self.send(f"[{self.mid}] {cmd} ok")
+            return
+
+
+def make_agent(monitor, queue, data_dir: Path,
+               token: str | None, chat_id: str | None) -> TelegramAgent | None:
+    """Build an agent if the operator configured a token; silent otherwise."""
+    import os
+    token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        return None
+    return TelegramAgent(monitor, queue, token, chat_id,
+                         machine_id(data_dir))

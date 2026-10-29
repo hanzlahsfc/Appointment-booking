@@ -222,6 +222,8 @@ class Config:
     booking: BookingConfig = field(default_factory=BookingConfig)
     hosted: HostedConfig = field(default_factory=HostedConfig)
     proxy: str | None = None  # e.g. socks5://user:pass@host:1080 or http://host:3128
+    telegram_token: str | None = None   # bot token — shared by all machines
+    telegram_chat_id: str | None = None  # group chat the operator watches
     root: Path = ROOT
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
     state_dir: Path = field(default_factory=lambda: ROOT / "state")
@@ -367,6 +369,7 @@ def load_config(path: str | Path | None = None) -> Config:
         to=list(notif_raw.get("to", []) or []),
     )
 
+    tg_raw = raw.get("telegram", {}) or {}
     cfg = Config(
         app=app,
         profiles=profiles,
@@ -374,6 +377,10 @@ def load_config(path: str | Path | None = None) -> Config:
         booking=_parse_booking(app_raw, ROOT),
         hosted=_parse_hosted(raw, ROOT),
         proxy=(raw.get("network", {}) or {}).get("proxy"),
+        telegram_token=os.getenv("TELEGRAM_BOT_TOKEN",
+                                 str(tg_raw.get("token", "")).strip()) or None,
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID",
+                                   str(tg_raw.get("chat_id", "")).strip()) or None,
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.creds_dir.mkdir(parents=True, exist_ok=True)
