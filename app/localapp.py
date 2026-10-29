@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -55,6 +56,7 @@ class LocalMonitor:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._ops_lock = asyncio.Lock()     # searches vs human actions
+        self._consec_errors = 0
         self.paused = False
         self.feed: dict = {"status": "idle", "events": [],
                            "stats": {"cycles": 0, "searches": 0,
@@ -147,10 +149,15 @@ class LocalMonitor:
                 try:
                     await driver._search(dmy)
                 except SiteNotConfigured as exc:
+                    self._consec_errors += 1
                     self._say("search_error", date=dmy, error=str(exc))
-                    # keep the feed bounded — errors grow one per date
                     self.feed["stats"]["errors_last"] = str(exc)
+                    # back off like a human who hit an error — the faster
+                    # you click through failures, the likelier a block
+                    await asyncio.sleep(
+                        min(60, 8 + self._consec_errors * random.uniform(4, 10)))
                     continue
+                self._consec_errors = 0
                 grid = await driver._read_grid(dmy)
                 self.feed["stats"]["searches"] += 1
                 self.feed["stats"]["latency_ms"] = round(
@@ -159,9 +166,9 @@ class LocalMonitor:
                 if grid:
                     found = {"date": dmy, "time": grid[0].split()[-1]}
                     break
-                # paced like a person clicking dates — not a burst; the
-                # portal rate-limits hard and rapid scans look like abuse
-                await asyncio.sleep(3 + (hash(dmy) % 3))
+                # human-pace: 3-7s between date checks, randomized —
+                # a burst of instant searches reads as automation
+                await asyncio.sleep(random.uniform(3, 7))
             if not found:
                 self._say("monitoring", applicant_id=applicant["id"],
                           state={"bookable": 0, "dates": dates})
