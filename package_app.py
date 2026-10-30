@@ -18,12 +18,14 @@ INCLUDE = [
     "wheels",
     "requirements.txt",
     "config.yaml",
+    "apk",
     "SETUP.bat",
     "START.bat",
     "DIAGNOSE.bat",
     "CLIENT-README.md",
     "HOW-TO-PAIR.md",
     "TELEGRAM-SETUP.md",
+    "README-APK.md",
     "HANDOFF.md",
 ]
 

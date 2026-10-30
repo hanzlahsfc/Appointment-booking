@@ -225,6 +225,10 @@ class Config:
     telegram_token: str | None = None   # bot token — shared by all machines
     telegram_chat_id: str | None = None  # group chat the operator watches
     captcha_api_key: str | None = None   # 2captcha key — auto-solve on confirm
+    firebase_url: str | None = None      # e.g. https://proj-default-rtdb.firebaseio.com
+    firebase_secret: str | None = None   # random path secret shared with the APK
+    otp_auto_request: bool = True        # request the SMS the moment a slot is held
+    otp_auto_confirm: bool = True        # enter OTP → captcha → Confirm and book
     root: Path = ROOT
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
     state_dir: Path = field(default_factory=lambda: ROOT / "state")
@@ -386,6 +390,18 @@ def load_config(path: str | Path | None = None) -> Config:
             "CAPTCHA_API_KEY",
             str((raw.get("captcha", {}) or {}).get("api_key", "")).strip()
         ) or None,
+        firebase_url=os.getenv(
+            "FIREBASE_URL",
+            str((raw.get("firebase", {}) or {}).get("url", "")).strip()
+        ) or None,
+        firebase_secret=os.getenv(
+            "FIREBASE_SECRET",
+            str((raw.get("firebase", {}) or {}).get("secret", "")).strip()
+        ) or None,
+        otp_auto_request=_parse_bool(
+            (raw.get("otp", {}) or {}).get("auto_request", True), True),
+        otp_auto_confirm=_parse_bool(
+            (raw.get("otp", {}) or {}).get("auto_confirm", True), True),
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.creds_dir.mkdir(parents=True, exist_ok=True)

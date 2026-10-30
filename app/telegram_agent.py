@@ -15,8 +15,6 @@ Commands (posted in the group chat):
   /status              every machine replies with its status
   /status ID           only machine ID replies
   /queue [ID]          queue listing
-  /otp-request ID      ask the portal to send the SMS code (ID's machine)
-  /otp ID 123456       fill the OTP into the held booking on ID's machine
   /confirm ID          press Confirm-and-book on ID's machine
   /pause ID · /resume ID · /start ID · /stop ID   monitor control
 
@@ -37,9 +35,10 @@ logger = logging.getLogger(__name__)
 _API = "https://api.telegram.org/bot{token}/{method}"
 _CMD = re.compile(r"^/([a-zA-Z_-]+)(?:\s+(\S+))?(?:\s+(.*))?$")
 _NOTABLE = {  # feed statuses that generate a group message
-    "selected_awaiting_human", "otp_sent", "booked", "outcome_unknown",
-    "failed", "queue_finished", "bridge_error", "error", "reset_error",
-    "portal_recovered",
+    "selected_awaiting_human", "otp_sent", "otp_entered", "otp_rejected",
+    "otp_request_failed", "auto_confirm_failed", "booked",
+    "outcome_unknown", "failed", "queue_finished", "bridge_error",
+    "error", "reset_error", "portal_recovered",
 }
 _ALERT_COOLDOWN = 600  # seconds between repeated alerts of the same kind
 
@@ -118,8 +117,7 @@ class TelegramAgent:
         self._http = httpx.AsyncClient(timeout=15)
         await self.send(f"[{self.mid}] STARTED — app running on "
                         f"127.0.0.1:{self.port} · pair the portal tab, then "
-                        f"/status /otp /otp-request /captcha /confirm "
-                        f"/pause /resume")
+                        f"/status /captcha /confirm /pause /resume")
         while not self._stop.is_set():
             try:
                 await self._poll_commands()
@@ -171,11 +169,11 @@ class TelegramAgent:
         if ev.get("after_errors"):
             extra += f" · after {ev['after_errors']} failed checks"
         if status == "selected_awaiting_human":
-            extra += (f"\n→ /otp-request {self.mid} then "
-                      f"/otp {self.mid} <code>, /captcha {self.mid} if "
-                      f"asked, /confirm {self.mid}")
+            extra += ("\n→ the APK on the client's phone auto-enters the "
+                      "code — this machine books it. Fallback: captcha on "
+                      f"the machine, then /confirm {self.mid}")
         elif status == "otp_sent":
-            extra += f"\n→ send /otp {self.mid} <code from SMS>"
+            extra += "\n→ SMS is on the client's phone — APK auto-enters"
         await self.send(f"[{self.mid}] {status} · {name}{extra}")
 
     async def _alert_on(self, ev: dict):
@@ -210,16 +208,13 @@ class TelegramAgent:
         # every machine sees every group message.
         broadcast = cmd in {"status", "queue", "list", "help"}
         if target and target.upper() != self.mid:
-            if broadcast or not (cmd == "otp" and target.isdigit()):
-                return  # addressed to another machine (or bad broadcast)
+            return  # addressed to another machine (or bad broadcast)
 
         if cmd in {"help", "start"}:
             await self.send(
                 f"[{self.mid}] commands:\n"
                 "/status [ID] — machine status\n"
                 "/queue [ID] — applicant queue\n"
-                f"/otp-request ID — send the SMS code\n"
-                "/otp ID <code> — enter the SMS code\n"
                 "/captcha ID — auto-solve the captcha\n"
                 "/confirm ID — press Confirm and book\n"
                 "/pause ID · /resume ID · /stop ID")
@@ -251,41 +246,6 @@ class TelegramAgent:
                 name = (r.get("data") or {}).get("display") or "?"
                 lines.append(f"{i}. {name} — {r['status']}")
             await self.send(f"[{self.mid}] queue:\n" + "\n".join(lines))
-            return
-
-        if cmd == "otp-request":
-            r = await self.monitor.request_otp()
-            await self.send(f"[{self.mid}] " + ("OTP requested — check the "
-                            "applicant's phone, then /otp " + self.mid +
-                            " <code>" if r.get("ok")
-                            else f"otp-request failed: {r.get('error')}"))
-            return
-
-        if cmd == "otp":
-            # "/otp <code>" (no machine id) only applies to this machine when
-            # it is actually holding a booking — every machine sees every
-            # group message, so a bare code must never hit a machine that
-            # isn't waiting. Targeted form: /otp <ID> <code>.
-            waiting = self.monitor.feed.get("status") in (
-                "selected_awaiting_human", "otp_sent")
-            if target and target.upper() == self.mid:
-                code = (rest or "").strip()
-            elif target and target.isdigit() and waiting:
-                code = target
-            elif target and target.isdigit():
-                return  # bare code, not waiting — not for us
-            else:
-                return  # addressed to another machine
-            if not code:
-                await self.send(f"[{self.mid}] usage: /otp {self.mid} <code>")
-                return
-            r = await self.monitor.submit_otp(code)
-            await self.send(
-                f"[{self.mid}] " +
-                (f"code entered — /captcha {self.mid} to auto-solve, or "
-                 f"solve it on the machine, "
-                 f"then /confirm {self.mid}" if r.get("ok")
-                 else f"otp failed: {r.get('error')}"))
             return
 
         if cmd == "captcha":

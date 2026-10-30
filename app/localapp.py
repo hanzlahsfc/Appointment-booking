@@ -59,6 +59,7 @@ class LocalMonitor:
         self._consec_errors = 0
         self.paused = False
         self.captcha_api_key: str | None = None  # set from config at boot
+        self.auto_request_otp = False            # on when firebase OTP pipe is up
         self.feed: dict = {"status": "idle", "events": [],
                            "stats": {"cycles": 0, "searches": 0,
                                      "latency_ms": None, "last_check": None}}
@@ -202,6 +203,13 @@ class LocalMonitor:
                     note=f"slot {found['date']} {found['time']}")
                 self._say("selected_awaiting_human",
                           applicant_id=applicant["id"], slot=slot)
+                # the APK chain: request the SMS now so the client's phone
+                # catches it and pushes the code straight back to us
+                if self.auto_request_otp:
+                    r = await self.request_otp()
+                    if not r.get("ok"):
+                        self._say("otp_request_failed",
+                                  error=r.get("error"))
         if not found:
             await self._sleep(self.interval)
 

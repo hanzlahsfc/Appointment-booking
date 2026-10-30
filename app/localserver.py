@@ -122,18 +122,18 @@ setInterval(refresh,3000);refresh();
 
 def create_app(queue: ApplicantQueue, monitor: LocalMonitor,
                bridge_client, allowed_origin: str, token: str,
-               telegram=None) -> FastAPI:
+               telegram=None, otp_channel=None) -> FastAPI:
     app = FastAPI(title="Appointment Booker — Local", docs_url=None,
                   redoc_url=None)
 
-    if telegram is not None:
+    for agent in (a for a in (telegram, otp_channel) if a is not None):
         @app.on_event("startup")
-        async def _tg_start():
-            telegram.start()
+        async def _agent_start(a=agent):
+            a.start()
 
         @app.on_event("shutdown")
-        async def _tg_stop():
-            await telegram.stop()
+        async def _agent_stop(a=agent):
+            await a.stop()
 
     def authed(request: Request) -> bool:
         auth = request.headers.get("authorization", "")
@@ -351,7 +351,15 @@ def run() -> None:
     from .telegram_agent import make_agent
     tg = make_agent(monitor, queue, data_dir,
                     cfg.telegram_token, cfg.telegram_chat_id, port=port)
-    app = create_app(queue, monitor, HUB, allowed, token, telegram=tg)
+    otp_ch = None
+    if cfg.firebase_url and cfg.firebase_secret:
+        from .otp_channel import OtpChannel
+        from .telegram_agent import machine_id as _mid
+        otp_ch = OtpChannel(monitor, cfg.firebase_url, cfg.firebase_secret,
+                            _mid(data_dir), auto_confirm=cfg.otp_auto_confirm)
+        monitor.auto_request_otp = cfg.otp_auto_request
+    app = create_app(queue, monitor, HUB, allowed, token, telegram=tg,
+                     otp_channel=otp_ch)
     url = f"http://127.0.0.1:{port}/?token={token}"
     print(f"Appointment Booker — local app")
     print(f"Dashboard: {url}")
@@ -361,6 +369,8 @@ def run() -> None:
         print("Telegram relay: off (set telegram.token + chat_id in config.yaml)")
     if monitor.captcha_api_key:
         print("Captcha solver: on (auto-solve before confirm)")
+    if otp_ch:
+        print(f"OTP channel (APK): on — firebase pipe to [{otp_ch.mid}]")
     print(f"Portal origin: {allowed} · extension bridge: ws://127.0.0.1:{port}/bridge")
     try:
         webbrowser.open(url)

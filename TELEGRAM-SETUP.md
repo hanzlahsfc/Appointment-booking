@@ -34,26 +34,20 @@ forwarding, no tunnel. Works behind school/office firewalls and NAT.
 | `/status` | every machine replies — status, paired tab, queue counts |
 | `/status NADIR-A4F2` | only that machine replies |
 | `/queue NADIR-A4F2` | applicant list + statuses |
-| `/otp-request NADIR-A4F2` | portal sends the SMS code |
-| `/otp NADIR-A4F2 123456` | enters the SMS code into the held booking |
 | `/confirm NADIR-A4F2` | presses **Confirm and book** — completes it |
 | `/pause NADIR-A4F2` · `/resume` · `/stop` · `/start` | monitor control |
 
-`/otp 123456` without an id also works — but only on the machine that is
-actually waiting for a code, so it can't hit the wrong one.
-
-## The OTP flow end-to-end
+## The booking flow end-to-end (OTP is handled by the APK — see README-APK.md)
 
 1. Machine finds a slot → group gets
    `[ID] selected_awaiting_human · NAME · slot 12/11/2025 09:00`
-   plus the exact commands to send next.
-2. You send `/otp-request ID` → portal texts the applicant's phone.
-3. You send `/otp ID 123456` → machine fills the code.
-4. If a captcha appears, a human solves it **on that machine** (captcha
-   can't be answered through Telegram — that's a portal rule, not ours).
-5. You send `/confirm ID` → machine presses Confirm and book, then
-   reports `BOOKED ✓ ref …` or parks the applicant for review if the
-   outcome is ambiguous — it never guesses a booking.
+   and the machine auto-requests the SMS itself.
+2. The APK on the client's phone reads the SMS and pushes the code
+   straight to the machine over Firebase — nobody types anything.
+3. Machine enters it → captcha auto-solve (if a key is set) → Confirm
+   and book → `BOOKED ✓ ref …` or `outcome_unknown` if the response was
+   ambiguous (parked, never guessed).
+4. `/confirm ID` and `/captcha ID` remain as manual fallbacks.
 
 ## Safety notes
 
