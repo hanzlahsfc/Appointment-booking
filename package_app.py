@@ -17,11 +17,13 @@ INCLUDE = [
     "extension",
     "wheels",
     "requirements.txt",
+    "config.yaml",
     "SETUP.bat",
     "START.bat",
     "DIAGNOSE.bat",
     "CLIENT-README.md",
     "HOW-TO-PAIR.md",
+    "TELEGRAM-SETUP.md",
     "HANDOFF.md",
 ]
 

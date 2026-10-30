@@ -58,8 +58,8 @@ notifications:
 # Each machine announces itself as [HOSTNAME-XXXX] and answers /commands
 # addressed to its id. See TELEGRAM-SETUP.md.
 telegram:
-  token: ""      # bot token from @BotFather (or set TELEGRAM_BOT_TOKEN)
-  chat_id: ""    # group chat id, e.g. -1001234567890 (or TELEGRAM_CHAT_ID)
+  token: ""      # bot token — set per-machine or via TELEGRAM_BOT_TOKEN (never commit)
+  chat_id: "-5598983572"  # Hanzlah. and NES group (or TELEGRAM_CHAT_ID)
 
 # CAPTCHA auto-solve (optional) — 2captcha.com key. With this set,
 # /confirm auto-solves reCAPTCHA first; /captcha <ID> solves on demand.
