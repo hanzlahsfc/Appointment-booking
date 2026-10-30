@@ -153,11 +153,16 @@ class LocalMonitor:
                     self._consec_errors += 1
                     self._say("search_error", date=dmy, error=str(exc))
                     self.feed["stats"]["errors_last"] = str(exc)
-                    # back off like a human who hit an error — the faster
-                    # you click through failures, the likelier a block
+                    # the portal collapses under load and takes ~1-5 min to
+                    # recover (confirmed by ops) — back off hard instead of
+                    # hammering a struggling server, escalating past 4 min
                     await asyncio.sleep(
-                        min(60, 8 + self._consec_errors * random.uniform(4, 10)))
+                        min(280, 8 + self._consec_errors
+                            * random.uniform(10, 25)))
                     continue
+                if self._consec_errors:
+                    self._say("portal_recovered",
+                              after_errors=self._consec_errors)
                 self._consec_errors = 0
                 grid = await driver._read_grid(dmy)
                 self.feed["stats"]["searches"] += 1

@@ -39,7 +39,9 @@ _CMD = re.compile(r"^/([a-zA-Z_-]+)(?:\s+(\S+))?(?:\s+(.*))?$")
 _NOTABLE = {  # feed statuses that generate a group message
     "selected_awaiting_human", "otp_sent", "booked", "outcome_unknown",
     "failed", "queue_finished", "bridge_error", "error", "reset_error",
+    "portal_recovered",
 }
+_ALERT_COOLDOWN = 600  # seconds between repeated alerts of the same kind
 
 
 def machine_id(data_dir: Path) -> str:
@@ -64,6 +66,8 @@ class TelegramAgent:
         self.port = port
         self._seen: set[int] = set()
         self._last_status: str | None = None
+        self._ev_ts = 0.0               # last processed feed-event timestamp
+        self._alert_at: dict = {}       # kind -> last alert time (cooldown)
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._http = None  # httpx.AsyncClient, created inside the loop
@@ -140,12 +144,20 @@ class TelegramAgent:
                 await self._handle(text)
 
     async def _watch_feed(self):
+        # scan every new feed event — errors like "session expired" or a
+        # collapsed portal must reach the phone even though they don't
+        # change the headline status
+        for ev in (self.monitor.feed.get("events") or []):
+            ts = ev.get("ts", 0)
+            if ts <= self._ev_ts:
+                continue
+            self._ev_ts = ts
+            await self._alert_on(ev)
+
         status = self.monitor.feed.get("status")
-        if status == self._last_status:
+        if status == self._last_status or status not in _NOTABLE:
             return
         self._last_status = status
-        if status not in _NOTABLE:
-            return
         ev = (self.monitor.feed.get("events") or [{}])[-1]
         cur = self.queue.current() or {}
         name = (cur.get("data") or {}).get("display") or cur.get("name") or "?"
@@ -156,6 +168,8 @@ class TelegramAgent:
             extra += f" · ref {ev['ref']}"
         if ev.get("error"):
             extra += f" · {str(ev['error'])[:140]}"
+        if ev.get("after_errors"):
+            extra += f" · after {ev['after_errors']} failed checks"
         if status == "selected_awaiting_human":
             extra += (f"\n→ /otp-request {self.mid} then "
                       f"/otp {self.mid} <code>, /captcha {self.mid} if "
@@ -163,6 +177,25 @@ class TelegramAgent:
         elif status == "otp_sent":
             extra += f"\n→ send /otp {self.mid} <code from SMS>"
         await self.send(f"[{self.mid}] {status} · {name}{extra}")
+
+    async def _alert_on(self, ev: dict):
+        """Cooldown-guarded alerts for event-level problems."""
+        if ev.get("status") != "search_error":
+            return
+        err = str(ev.get("error") or "")
+        if "session expired" in err:
+            kind, text = "session", (
+                "SESSION EXPIRED — the portal logged out. Sign back in on "
+                "the portal tab of this machine, monitoring keeps running.")
+        else:
+            kind, text = "portal_down", (
+                "portal not responding — the site is overloaded or "
+                "blocking. Backing off; it usually recovers in ~1-5 min.")
+        now = time.time()
+        if now - self._alert_at.get(kind, 0) < _ALERT_COOLDOWN:
+            return
+        self._alert_at[kind] = now
+        await self.send(f"[{self.mid}] {text}")
 
     # ── commands ─────────────────────────────────────────────────────────
 
