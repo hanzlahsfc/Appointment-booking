@@ -54,12 +54,14 @@ def machine_id(data_dir: Path) -> str:
 
 
 class TelegramAgent:
-    def __init__(self, monitor, queue, token: str, chat_id: str, mid: str):
+    def __init__(self, monitor, queue, token: str, chat_id: str, mid: str,
+                 port: int = 8080):
         self.monitor = monitor
         self.queue = queue
         self.token = token
         self.chat_id = str(chat_id)
         self.mid = mid
+        self.port = port
         self._seen: set[int] = set()
         self._last_status: str | None = None
         self._task: asyncio.Task | None = None
@@ -110,8 +112,10 @@ class TelegramAgent:
     async def _run(self):
         import httpx
         self._http = httpx.AsyncClient(timeout=15)
-        await self.send(f"[{self.mid}] online — commands: /status, /otp, "
-                        f"/otp-request, /confirm, /pause, /resume")
+        await self.send(f"[{self.mid}] STARTED — app running on "
+                        f"127.0.0.1:{self.port} · pair the portal tab, then "
+                        f"/status /otp /otp-request /captcha /confirm "
+                        f"/pause /resume")
         while not self._stop.is_set():
             try:
                 await self._poll_commands()
@@ -288,7 +292,8 @@ class TelegramAgent:
 
 
 def make_agent(monitor, queue, data_dir: Path,
-               token: str | None, chat_id: str | None) -> TelegramAgent | None:
+               token: str | None, chat_id: str | None,
+               port: int = 8080) -> TelegramAgent | None:
     """Build an agent if the operator configured a token; silent otherwise."""
     import os
     token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -296,4 +301,4 @@ def make_agent(monitor, queue, data_dir: Path,
     if not token or not chat_id:
         return None
     return TelegramAgent(monitor, queue, token, chat_id,
-                         machine_id(data_dir))
+                         machine_id(data_dir), port=port)

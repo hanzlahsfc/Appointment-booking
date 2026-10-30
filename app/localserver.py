@@ -347,11 +347,11 @@ def run() -> None:
 
     monitor = LocalMonitor(queue, page_factory, allowed)
     monitor.captcha_api_key = cfg.captcha_api_key
+    port = int(getattr(cfg, "local_port", 8080))
     from .telegram_agent import make_agent
     tg = make_agent(monitor, queue, data_dir,
-                    cfg.telegram_token, cfg.telegram_chat_id)
+                    cfg.telegram_token, cfg.telegram_chat_id, port=port)
     app = create_app(queue, monitor, HUB, allowed, token, telegram=tg)
-    port = int(getattr(cfg, "local_port", 8080))
     url = f"http://127.0.0.1:{port}/?token={token}"
     print(f"Appointment Booker — local app")
     print(f"Dashboard: {url}")
