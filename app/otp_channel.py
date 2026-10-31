@@ -22,6 +22,12 @@ import re
 logger = logging.getLogger(__name__)
 
 _CODE = re.compile(r"^\s*\"?(\d{4,8})\"?\s*$")
+_DIGITS = re.compile(r"\D")
+
+
+def _tail(number: str, n: int = 4) -> str:
+    """Last n digits of a phone number — country-prefix agnostic."""
+    return _DIGITS.sub("", str(number or ""))[-n:]
 
 
 class OtpChannel:
@@ -63,16 +69,45 @@ class OtpChannel:
                 logger.warning("otp channel error: %s", exc)
             await asyncio.sleep(self.poll_s)
 
+    def _phone_ok(self, apk_phone: str) -> bool:
+        """Bind the code to the applicant being booked — the APK sends the
+        client's number; we accept only if its tail matches the current
+        applicant's stored phone. Empty on either side can't bind, so we
+        accept rather than silently break the single-phone case."""
+        applicant = self.monitor.queue.current()
+        want = _tail(((applicant or {}).get("data") or {}).get("phone"))
+        got = _tail(apk_phone)
+        return not want or not got or want == got
+
     async def _poll(self):
         r = await self._http.get(self._node())
         if r.status_code != 200 or r.text in ("null", ""):
             return
+        # payload: {"code":"123456","phone":"+92…"} — bare "123456" tolerated
+        code, apk_phone = None, ""
         m = _CODE.match(r.text)
-        if not m:
-            return  # garbage in the node — leave it for the operator
-        code = m.group(1)
+        if m:
+            code = m.group(1)
+        else:
+            try:
+                obj = r.json()
+                code = str(obj.get("code", "")).strip()
+                apk_phone = str(obj.get("phone", "")).strip()
+            except Exception:
+                return
+        if not code or not code.isdigit() or not (4 <= len(code) <= 8):
+            return
         # consume first so a second poll can't re-enter a stale code
         await self._http.delete(self._node())
+        if not self._phone_ok(apk_phone):
+            applicant = self.monitor.queue.current() or {}
+            self.monitor._say(
+                "otp_mismatch", source="apk",
+                error=f"code from a different phone than "
+                      f"{(applicant.get('data') or {}).get('display', '?')}"
+                      " — rejected")
+            logger.warning("otp channel: phone mismatch — code rejected")
+            return
         logger.info("otp channel: received code for %s", self.mid)
         r2 = await self.monitor.submit_otp(code)
         if not r2.get("ok"):

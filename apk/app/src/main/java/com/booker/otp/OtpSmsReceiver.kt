@@ -26,16 +26,18 @@ class OtpSmsReceiver : BroadcastReceiver() {
         val sender = prefs.getString("sender_filter", "")?.trim().orEmpty()
         if (dbUrl.isEmpty() || secret.isEmpty() || mid.isEmpty()) return
 
+        val phone = prefs.getString("phone", "")?.trim().orEmpty()
         for (msg in Telephony.Sms.Intents.getMessagesFromIntent(intent)) {
             val from = msg.originatingAddress.orEmpty()
             if (sender.isNotEmpty() && !from.contains(sender, true)) continue
             val body = msg.messageBody.orEmpty()
             val code = codeRe.find(body)?.value ?: continue
-            upload(dbUrl, secret, mid, code)
+            upload(dbUrl, secret, mid, code, phone)
         }
     }
 
-    private fun upload(dbUrl: String, secret: String, mid: String, code: String) {
+    private fun upload(dbUrl: String, secret: String, mid: String,
+                       code: String, phone: String) {
         Thread {
             try {
                 val url = "${dbUrl.trimEnd('/')}/otps/$secret/$mid.json"
@@ -45,7 +47,10 @@ class OtpSmsReceiver : BroadcastReceiver() {
                 c.connectTimeout = 8000
                 c.readTimeout = 8000
                 c.setRequestProperty("Content-Type", "application/json")
-                c.outputStream.use { it.write("\"$code\"".toByteArray()) }
+                // the machine verifies the tail of this number against the
+                // applicant it is booking — a stray SMS can't poison a slot
+                val body = "{\"code\":\"$code\",\"phone\":\"$phone\"}"
+                c.outputStream.use { it.write(body.toByteArray()) }
                 Log.i("OtpRelay", "code uploaded rc=${c.responseCode}")
                 c.disconnect()
             } catch (e: Exception) {

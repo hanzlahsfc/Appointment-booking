@@ -36,7 +36,7 @@ _API = "https://api.telegram.org/bot{token}/{method}"
 _CMD = re.compile(r"^/([a-zA-Z_-]+)(?:\s+(\S+))?(?:\s+(.*))?$")
 _NOTABLE = {  # feed statuses that generate a group message
     "selected_awaiting_human", "otp_sent", "otp_entered", "otp_rejected",
-    "otp_request_failed", "auto_confirm_failed", "booked",
+    "otp_mismatch", "otp_request_failed", "auto_confirm_failed", "booked",
     "outcome_unknown", "failed", "queue_finished", "bridge_error",
     "error", "reset_error", "portal_recovered",
 }

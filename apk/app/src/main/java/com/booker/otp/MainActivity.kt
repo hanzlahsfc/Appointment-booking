@@ -30,6 +30,7 @@ class MainActivity : Activity() {
         val dbUrl = field(this, "Firebase URL (https://….firebaseio.com)", "db_url")
         val secret = field(this, "Shared secret (same as config.yaml)", "secret")
         val mid = field(this, "Machine ID e.g. NADIR-A4F2", "machine_id")
+        val phone = field(this, "Client phone number (OTP binding)", "phone")
         val sender = field(this, "Sender filter (optional, e.g. GVCW)", "sender_filter")
         val status = TextView(this)
 
@@ -40,6 +41,7 @@ class MainActivity : Activity() {
                     .putString("db_url", dbUrl.text.toString())
                     .putString("secret", secret.text.toString())
                     .putString("machine_id", mid.text.toString())
+                    .putString("phone", phone.text.toString())
                     .putString("sender_filter", sender.text.toString())
                     .apply()
                 startForegroundService(Intent(this@MainActivity, OtpService::class.java))
@@ -82,7 +84,8 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 60, 40, 40)
             addView(TextView(context).apply { text = "OTP Relay — crawler config"; textSize = 18f })
-            addView(dbUrl); addView(secret); addView(mid); addView(sender)
+            addView(dbUrl); addView(secret); addView(mid); addView(phone)
+            addView(sender)
             addView(perm); addView(save); addView(test); addView(status)
         })
     }

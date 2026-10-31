@@ -69,6 +69,7 @@ Category <select id="cat"><option value="26">Seasonal/Dependent Employment (26)<
 <input id="as" placeholder="surname"><input id="af" placeholder="firstname">
 <input id="ad" placeholder="DOB DD/MM/YYYY"><input id="ap" placeholder="passport">
 <input id="av" placeholder="doc valid until DD/MM/YYYY">
+<input id="aph" placeholder="phone (OTP binding, optional)">
 <button onclick="addApp()">Add</button></div>
 <table><tr><th>#</th><th>name</th><th>status</th><th>note</th><th></th></tr>
 <tbody id="q"></tbody></table></div>
@@ -110,7 +111,7 @@ async function refresh(){
 function esc(s){return (s||'').toString().replace(/[<>&]/g,'');}
 async function pair(){const r=await api('/api/pair',{method:'POST',body:JSON.stringify({})});const d=await r.json();document.getElementById('pair-status').textContent=d.ok?'paired ✓':('failed: '+(d.error||''));}
 async function ctl(a){await api('/api/monitor/'+a,{method:'POST'});refresh();}
-async function addApp(){const data={surname:as.value,firstname:af.value,dateofbirth:ad.value,passportnumber:ap.value,traveldocumentvaliduntil:av.value};const r=await api('/api/applicants',{method:'POST',body:JSON.stringify({display_name:(as.value+' '+af.value).trim(),data:data,category:document.getElementById('cat').value})});const d=await r.json();if(d.error)banner(d.error,'err');else banner('');refresh();}
+async function addApp(){const data={surname:as.value,firstname:af.value,dateofbirth:ad.value,passportnumber:ap.value,traveldocumentvaliduntil:av.value,phone:aph.value};const r=await api('/api/applicants',{method:'POST',body:JSON.stringify({display_name:(as.value+' '+af.value).trim(),data:data,category:document.getElementById('cat').value})});const d=await r.json();if(d.error)banner(d.error,'err');else banner('');refresh();}
 async function mv(i,dir){await api('/api/applicants/'+i+'/move',{method:'POST',body:JSON.stringify({direction:dir})});refresh();}
 async function del(i){await api('/api/applicants/'+i,{method:'DELETE'});refresh();}
 async function otpReq(){const r=await api('/api/booking/otp-request',{method:'POST'});const d=await r.json();banner(d.ok?'OTP requested — check your phone':d.error,'warn');}
