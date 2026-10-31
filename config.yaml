@@ -58,7 +58,7 @@ notifications:
 # Each machine announces itself as [HOSTNAME-XXXX] and answers /commands
 # addressed to its id. See TELEGRAM-SETUP.md.
 telegram:
-  token: "9141290881:AAHIl5VAL0fmV9h7il-TZwqu9oqq4XJ6Hgc"  # NES bot
+  token: ""      # bot token — set per-machine or via TELEGRAM_BOT_TOKEN (never commit)
   chat_id: "-5598983572"  # Hanzlah. and NES group (or TELEGRAM_CHAT_ID)
 
 # CAPTCHA auto-solve (optional) — 2captcha.com key. With this set,
@@ -70,8 +70,8 @@ captcha:
 # OTP relay — APK on the client's phone writes the SMS code here; the
 # machine polls it every 2s. See README-APK.md. Generate your own secret.
 firebase:
-  url: ""          # e.g. https://proj-default-rtdb.europe-west1.firebasedatabase.app
-  secret: ""       # 32+ char random path secret shared with the APK
+  url: ""          # RTDB URL — set per-machine or via FIREBASE_URL (never commit)
+  secret: ""       # shared with APK — set per-machine or via FIREBASE_SECRET (never commit)
 otp:
   auto_request: true   # request the SMS the moment a slot is selected
   auto_confirm: true   # OTP in → captcha → Confirm and book automatically

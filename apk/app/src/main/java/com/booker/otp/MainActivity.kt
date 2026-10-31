@@ -31,7 +31,8 @@ class MainActivity : Activity() {
         val secret = field(this, "Shared secret (same as config.yaml)", "secret")
         val mid = field(this, "Machine ID e.g. NADIR-A4F2", "machine_id")
         val phone = field(this, "Client phone number (OTP binding)", "phone")
-        val sender = field(this, "Sender filter (optional, e.g. GVCW)", "sender_filter")
+        val sender = field(this, "Sender filter", "sender_filter")
+        sender.setText(prefs.getString("sender_filter", "GERRYS."))
         val status = TextView(this)
 
         val save = Button(this).apply {

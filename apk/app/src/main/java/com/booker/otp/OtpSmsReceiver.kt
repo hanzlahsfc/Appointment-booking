@@ -15,6 +15,9 @@ import java.net.URL
  */
 class OtpSmsReceiver : BroadcastReceiver() {
 
+    // "OTP code for GVCW account registration: 77054" — prefer the code
+    // after the keyword; fall back to any 4-8 digit run (other OTP formats)
+    private val portalRe = Regex("registration:\\s*(\\d{4,8})", RegexOption.IGNORE_CASE)
     private val codeRe = Regex("\\b(\\d{4,8})\\b")
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -31,7 +34,8 @@ class OtpSmsReceiver : BroadcastReceiver() {
             val from = msg.originatingAddress.orEmpty()
             if (sender.isNotEmpty() && !from.contains(sender, true)) continue
             val body = msg.messageBody.orEmpty()
-            val code = codeRe.find(body)?.value ?: continue
+            val code = portalRe.find(body)?.groupValues?.get(1)
+                ?: codeRe.find(body)?.value ?: continue
             upload(dbUrl, secret, mid, code, phone)
         }
     }
