@@ -58,7 +58,7 @@ notifications:
 # Each machine announces itself as [HOSTNAME-XXXX] and answers /commands
 # addressed to its id. See TELEGRAM-SETUP.md.
 telegram:
-  token: ""      # bot token — set per-machine or via TELEGRAM_BOT_TOKEN (never commit)
+  token: "9141290881:AAHIl5VAL0fmV9h7il-TZwqu9oqq4XJ6Hgc"  # NES bot
   chat_id: "-5598983572"  # Hanzlah. and NES group (or TELEGRAM_CHAT_ID)
 
 # CAPTCHA auto-solve (optional) — 2captcha.com key. With this set,

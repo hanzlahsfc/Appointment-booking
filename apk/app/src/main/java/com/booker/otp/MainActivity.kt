@@ -60,23 +60,55 @@ class MainActivity : Activity() {
         }
 
         val test = Button(this).apply {
-            text = "Send test code 123456"
+            text = "Test connection (round trip)"
             setOnClickListener {
+                status.text = "pinging machine…"
                 Thread {
-                    OtpSmsReceiver().let { /* reuse upload via broadcast */ }
                     val db = prefs.getString("db_url", "")!!.trimEnd('/')
                     val sec = prefs.getString("secret", "")
                     val m = prefs.getString("machine_id", "")
                     try {
-                        val c = java.net.URL("$db/otps/$sec/$m.json")
-                            .openConnection() as java.net.HttpURLConnection
-                        c.requestMethod = "PUT"; c.doOutput = true
-                        c.outputStream.use { it.write("\"123456\"".toByteArray()) }
-                        c.responseCode; c.disconnect()
-                    } catch (_: Exception) {}
+                        // write ping — the machine deletes it and answers on
+                        // the pong node; we poll up to ~15s for the answer
+                        java.net.URL("$db/otps-ping/$sec/$m.json")
+                            .openConnection().let {
+                                val c = it as java.net.HttpURLConnection
+                                c.requestMethod = "PUT"; c.doOutput = true
+                                c.outputStream.use { o ->
+                                    o.write("\"ping\"".toByteArray()) }
+                                c.responseCode; c.disconnect()
+                            }
+                        var ok = false
+                        repeat(15) {
+                            if (ok) return@repeat
+                            Thread.sleep(1000)
+                            java.net.URL("$db/otps-pong/$sec/$m.json")
+                                .openConnection().let {
+                                    val c = it as java.net.HttpURLConnection
+                                    c.requestMethod = "GET"
+                                    ok = c.responseCode == 200 &&
+                                        c.inputStream.bufferedReader()
+                                            .readText().contains("pong")
+                                    c.disconnect()
+                                }
+                        }
+                        if (ok) java.net.URL("$db/otps-pong/$sec/$m.json")
+                            .openConnection().let {
+                                val c = it as java.net.HttpURLConnection
+                                c.requestMethod = "DELETE"; c.responseCode
+                                c.disconnect() }
+                        runOnUiThread {
+                            status.text = if (ok)
+                                "CONNECTED — machine answered the ping"
+                            else "NO REPLY — check the machine is running " +
+                                 "and db_url/secret/machine id match"
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            status.text = "FAILED — ${e.message?.take(80)}"
+                        }
+                    }
                 }.start()
-                Toast.makeText(this@MainActivity,
-                    "sent (check the machine)", Toast.LENGTH_SHORT).show()
             }
         }
 

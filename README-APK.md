@@ -18,12 +18,9 @@ Confirm and book — zero humans in the loop.
    ```json
    {
      "rules": {
-       "otps": {
-         "$secret": {
-           ".read": true,
-           ".write": true
-         }
-       }
+       "otps":      {"$secret": {".read": true, ".write": true}},
+       "otps-ping": {"$secret": {".read": true, ".write": true}},
+       "otps-pong": {"$secret": {".read": true, ".write": true}}
      }
    }
    ```
@@ -64,6 +61,10 @@ otp:
      (e.g. the portal's sender name) so bank OTPs are ignored
 2. **Grant SMS permission** → allow
 3. **Save + Start Relay** → status shows "relay running"
+4. **Test connection** → writes a ping and waits ~15s for the machine to
+   answer — shows `CONNECTED — machine answered the ping` when the whole
+   path works (phone→Firebase→machine→phone). If it says NO REPLY, check
+   the machine is running and the three fields match its config exactly.
 4. Android may still kill it later: Settings → Apps → OTP Relay →
    Battery → **Unrestricted**. Also turn off any vendor "deep sleep" list.
 5. The app must be set up once per machine it serves — for multiple

@@ -46,6 +46,12 @@ class OtpChannel:
     def _node(self) -> str:
         return f"{self.db_url}/otps/{self.secret}/{self.mid}.json"
 
+    def _ping_node(self) -> str:
+        return f"{self.db_url}/otps-ping/{self.secret}/{self.mid}.json"
+
+    def _pong_node(self) -> str:
+        return f"{self.db_url}/otps-pong/{self.secret}/{self.mid}.json"
+
     def start(self):
         self._task = asyncio.create_task(self._run())
 
@@ -65,9 +71,20 @@ class OtpChannel:
         while not self._stop.is_set():
             try:
                 await self._poll()
+                await self._poll_ping()
             except Exception as exc:
                 logger.warning("otp channel error: %s", exc)
             await asyncio.sleep(self.poll_s)
+
+    async def _poll_ping(self):
+        """APK 'test connection' writes here; we answer on the pong node —
+        a real round-trip proves phone→firebase→machine→firebase→phone."""
+        r = await self._http.get(self._ping_node())
+        if r.status_code != 200 or r.text in ("null", ""):
+            return
+        await self._http.delete(self._ping_node())
+        await self._http.put(self._pong_node(),
+                             content='"pong"')
 
     def _phone_ok(self, apk_phone: str) -> bool:
         """Bind the code to the applicant being booked — the APK sends the
