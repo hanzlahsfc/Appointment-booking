@@ -31,7 +31,8 @@ INCLUDE = [
 
 EXCLUDE_PARTS = {
     ".git", ".venv", "venv", "__pycache__", ".pytest_cache", "data",
-    "dist", "node_modules", "recon", "captures",
+    "dist", "node_modules", "recon", "captures", "build", ".gradle",
+    ".idea",
 }
 EXCLUDE_SUFFIXES = {".pyc", ".db", ".sqlite", ".sqlite3", ".log", ".png",
                     ".zip", ".tar", ".gz", ".pem", ".key", ".env",

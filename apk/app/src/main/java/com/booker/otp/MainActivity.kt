@@ -73,7 +73,8 @@ class MainActivity : Activity() {
                         c.responseCode; c.disconnect()
                     } catch (_: Exception) {}
                 }.start()
-                Toast.makeText(this, "sent (check the machine)", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity,
+                    "sent (check the machine)", Toast.LENGTH_SHORT).show()
             }
         }
 
